@@ -19,7 +19,7 @@
 
 ## Examples
 
-Please check ./examples/ directory.
+Please check `./examples/` directory.
 
 ```bash
 # Run client

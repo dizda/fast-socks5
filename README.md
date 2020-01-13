@@ -1,7 +1,12 @@
 # SOCKS5 client/server library using async/.await
+[![License](https://img.shields.io/github/license/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5)
+[![crates.io](https://img.shields.io/crates/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
+[![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
+[![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
 
 ## Features
 
+- An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.
 - No **unsafe** code
 - Built on-top of `async-std` library
 - Ultra lightweight and scalable
@@ -17,6 +22,11 @@
 - Config helper for Socks5Server
 - Helpers to run a Socks5Server à la *"async-std's TcpStream"* via `incoming.next().await`
 - Examples come with real cases commands scenarios
+
+## Install
+
+Open in [crates.io](https://crates.io/crates/fast-socks5).
+
 
 ## Examples
 

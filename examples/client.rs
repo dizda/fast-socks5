@@ -13,6 +13,17 @@ use fast_socks5::{client::Socks5Stream, Result, SocksError};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
 use structopt::StructOpt;
 
+/// # How to use it:
+///
+/// GET / of web server by IPv4 address:
+///   `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a 208.97.177.124 -p 80`
+///
+/// GET / of web server by IPv6 address:
+///   `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a ::ffff:208.97.177.124 -p 80`
+///
+/// GET / of web server by domain name:
+///   `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a perdu.com -p 80`
+///
 #[derive(Debug, StructOpt)]
 #[structopt(name = "socks5-client", about = "A simple example of a socks5-client.")]
 struct Opt {
@@ -35,17 +46,6 @@ struct Opt {
     pub password: Option<String>,
 }
 
-/// # How to use it:
-///
-/// GET / of web server by IPv4 address:
-///     `$ RUST_LOG=debug cargo run --bin socks5_client -- --socks-server 127.0.0.1:1337 -a 208.97.177.124 -p 80`
-///
-/// GET / of web server by IPv6 address:
-///     `$ RUST_LOG=debug cargo run --bin socks5_client -- --socks-server 127.0.0.1:1337 -a ::ffff:208.97.177.124 -p 80`
-///
-/// GET / of web server by domain name:
-///     `$ RUST_LOG=debug cargo run --bin socks5_client -- --socks-server 127.0.0.1:1337 -a perdu.com -p 80`
-///
 fn main() -> Result<()> {
     env_logger::init();
 

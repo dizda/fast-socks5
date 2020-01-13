@@ -1,9 +1,10 @@
 [package]
 name = "fast-socks5"
 version = "0.1.0"
-authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
+authors = ["Jonathan Dizdarevic <dizda@dizda.fr>"]
 edition = "2018"
 license = "MIT"
+description = "Fast SOCKS5 client/server implementation written in Rust async/.await (with async-std)"
 
 [dependencies]
 futures = "0.3"

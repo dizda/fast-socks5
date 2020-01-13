@@ -2,6 +2,7 @@
 
 ## Features
 
+- No **unsafe** code
 - Built on-top of `async-std` library
 - Ultra lightweight and scalable
 - No system dependencies
@@ -14,7 +15,7 @@
 - AsyncRead + AsyncWrite traits are implemented on Socks5Stream
 - IPv4, IPv6, and Domains types are supported
 - Config helper for Socks5Server
-- Helpers to run a Socks5Server à la *"async-std's TcpStream"*-like via `incoming.next().await`
+- Helpers to run a Socks5Server à la *"async-std's TcpStream"* via `incoming.next().await`
 - Examples come with real cases commands scenarios
 
 ## Examples

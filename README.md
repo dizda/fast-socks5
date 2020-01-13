@@ -1,6 +1,11 @@
-# Socks5 implementation
+# SOCKS5 async/.await Rust implementation
 
 Using async-std library.
+
+## Examples
+
+- Run client `cargo run --example client`
+- Run server `cargo run --example server`
 
 ## TODO
 - Tests have to be implemented

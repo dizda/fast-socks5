@@ -8,10 +8,14 @@ license = "MIT"
 [dependencies]
 futures = "0.3"
 log = "0.4"
-async-std = "1.4"
+async-std = { version = "1.4", features = ["default", "unstable"] }
 anyhow = "1.0"
 thiserror = "1.0"
 structopt = "0.3"
+
+# Dependencies for examples/
+[dev-dependencies]
+env_logger = "0.7"
 
 [[example]]
 name = "server"

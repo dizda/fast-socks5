@@ -1,6 +1,6 @@
 # SOCKS5 client/server library using async/.await
 [![License](https://img.shields.io/github/license/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5)
-[![crates.io](https://img.shields.io/crates/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
+[![crates.io](https://img.shields.io/crates/v/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
 [![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
 [![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
 

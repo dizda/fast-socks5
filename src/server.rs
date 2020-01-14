@@ -405,6 +405,9 @@ impl Socks5Socket {
     /// then forward the data between them (client <=> target address).
     async fn execute_request(&mut self, addr: SocketAddr) -> Result<()> {
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
+        // TODO: timeout might not be appropriated in the case when we client wants to download a file
+        //       (then the stream should last for more than 10s).
+        //       Test by downloading a linux distro with curl & socks
         let mut outbound = match future::timeout(
             std::time::Duration::from_secs(self.config.request_timeout),
             TcpStream::connect(addr),

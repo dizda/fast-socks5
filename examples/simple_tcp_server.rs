@@ -2,6 +2,8 @@
 #[macro_use]
 extern crate log;
 
+use async_std::net::TcpListener;
+use async_std::sync::Arc;
 use async_std::{future::Future, stream::StreamExt, task};
 use fast_socks5::{
     server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
@@ -78,8 +80,10 @@ async fn spawn_socks_server() -> Result<()> {
         }
     }
 
-    let mut listener = Socks5Server::bind(&opt.listen_addr).await?;
-    listener.set_config(config);
+    let config = Arc::new(config);
+
+    let mut listener = TcpListener::bind(&opt.listen_addr).await?;
+    //    listener.set_config(config);
 
     let mut incoming = listener.incoming();
 
@@ -89,8 +93,8 @@ async fn spawn_socks_server() -> Result<()> {
     while let Some(socket_res) = incoming.next().await {
         match socket_res {
             Ok(socket) => {
-                //                let socket = Socks5Socket::new(socket, opt.request_timeout);
-                //                info!("Connection from {}", socket.peer_addr()?);
+                info!("Connection from {}", socket.peer_addr()?);
+                let socket = Socks5Socket::new(socket, config.clone());
 
                 //                                socket.upgrade_to_socks5().await;
                 spawn_and_log_error(socket.upgrade_to_socks5());

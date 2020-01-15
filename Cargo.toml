@@ -24,3 +24,6 @@ name = "server"
 
 [[example]]
 name = "client"
+
+[[example]]
+name = "simple_tcp_server"

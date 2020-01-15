@@ -1,6 +1,6 @@
 use crate::read_exact;
-use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use crate::util::target_addr::read_address;
+use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use async_std::{
     future,
@@ -13,7 +13,6 @@ use futures::{
     stream::Stream,
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
-use std::borrow::Borrow;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -94,18 +93,20 @@ pub struct Incoming<'a>(&'a Socks5Server);
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
 impl<'a> Stream for Incoming<'a> {
-    type Item = Result<Socks5Socket>;
+    type Item = Result<Socks5Socket<TcpStream>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut AsyncContext<'_>) -> Poll<Option<Self::Item>> {
         let mut fut = self.0.listener.accept();
         // have to pin the future, otherwise can't poll it
         futures::pin_mut!(fut);
 
-        let (socket, _) = futures::ready!(fut.poll(cx))?;
+        let (socket, peer_addr) = futures::ready!(fut.poll(cx))?;
         debug!("accept ready, upgrading to socks...");
-
+        dbg!(&peer_addr);
+        dbg!(&socket.peer_addr());
+        dbg!(&socket.local_addr());
         // Wrap the TcpStream into Socks5Socket
-        let socket = Socks5Socket::new(socket, self.0.config.clone());
+        let socket = Socks5Socket::new(socket, self.0.config.clone(), peer_addr);
         //        socket.write(&[4]);
         //        let mut socket = Socks5Socket::new(socket);
         //        let fut = socket.upgrade_to_socks5();
@@ -120,23 +121,26 @@ impl<'a> Stream for Incoming<'a> {
 }
 
 /// Wrap every TcpStream and contains Socks5 protocol implementation.
-pub struct Socks5Socket {
-    inner: TcpStream,
+pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
+    inner: T,
     config: Arc<Config>,
+    //TODO: store peer_addr
+    peer_addr: SocketAddr, //    local_addr:
 }
 
-impl Socks5Socket {
-    pub fn new(socket: TcpStream, config: Arc<Config>) -> Socks5Socket {
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
+    pub fn new(socket: T, config: Arc<Config>, peer_addr: SocketAddr) -> Self {
         Socks5Socket {
             inner: socket,
             config,
+            peer_addr,
         }
     }
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
-    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket> {
-        info!("Connected client: {}", self.inner.peer_addr()?);
+    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T>> {
+        //        info!("Connected client: {}", self.inner.peer_addr()?);
 
         // Handshake
         {
@@ -450,68 +454,83 @@ impl Socks5Socket {
 
         trace!("Wrote success");
 
-        self.transfer(&mut outbound).await
+        transfer(&mut self.inner, outbound).await
     }
 
-    /// Copy data between two peers
-    async fn transfer(&mut self, outbound: &mut TcpStream) -> Result<()> {
-        let (mut ri, mut wi) = (&self.inner, &self.inner);
-        let (mut ro, mut wo) = (&*outbound, &*outbound);
-
-        // Exchange data
-        // For some reasons, futures::future::select does not work with async_std::io::copy() 🤔
-        let inbound_to_outbound = futures::io::copy(&mut ri, &mut wo);
-        let outbound_to_inbound = futures::io::copy(&mut ro, &mut wi);
-
-        // We choose `select` over `join` because the inbound (client) is more likely to leave the connection open for a while,
-        // while it's not necessarily as the other part (outbound, aka remote server) has closed the communication.
-        let test = match futures::future::select(inbound_to_outbound, outbound_to_inbound).await {
-            Either::Left((Ok(data), _)) => info!(
-                "CONNECT relay {} -> {} target closed ({} bytes consumed)",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                data
-            ),
-            Either::Left((Err(err), _)) => error!(
-                "CONNECT relay {} -> {} target closed with error {:?}",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                err,
-            ),
-            Either::Right((Ok(data), _)) => info!(
-                "CONNECT relay {} <- {} target closed ({} bytes consumed)",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                data
-            ),
-            Either::Right((Err(err), _)) => error!(
-                "CONNECT relay {} <- {} target closed with error {:?}",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                err,
-            ),
-        };
-
-        Ok(())
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
     }
 }
 
-/// Allow us to implement all `TcpStream's` functions to `Socks5Socket`
-impl Deref for Socks5Socket {
-    type Target = TcpStream;
+/// Copy data between two peers
+/// Using 2 different generators, because they could be different structs with same traits.
+async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
+where
+    I: AsyncRead + AsyncWrite + Unpin,
+    O: AsyncRead + AsyncWrite + Unpin,
+{
+    //    let (mut ri, mut wi) = (&inbound, &inbound);
+    let (mut ri, mut wi) = futures::io::AsyncReadExt::split(&mut inbound);
+    //    let (mut ro, mut wo) = (&outbound, &outbound);
+    let (mut ro, mut wo) = futures::io::AsyncReadExt::split(outbound);
 
-    fn deref(&self) -> &TcpStream {
-        // will actually point on struct's Vec
-        &self.inner
-    }
+    // Exchange data
+    // For some reasons, futures::future::select does not work with async_std::io::copy() 🤔
+    let inbound_to_outbound = futures::io::copy(&mut ri, &mut wo);
+    let outbound_to_inbound = futures::io::copy(&mut ro, &mut wi);
+
+    // I've chosen `select` over `join` because the inbound (client) is more likely to leave the connection open for a while,
+    // while it's not necessarily as the other part (outbound, aka remote server) has closed the communication.
+    let test = match futures::future::select(inbound_to_outbound, outbound_to_inbound).await {
+        Either::Left((Ok(data), _)) => info!(
+            //                "CONNECT relay {} -> {} target closed ({} bytes consumed)",
+            //                self.inner.peer_addr()?,
+            "CONNECT relay X -> X target closed ({} bytes consumed)",
+            //                outbound.peer_addr()?,
+            data
+        ),
+        Either::Left((Err(err), _)) => error!(
+            //                "CONNECT relay {} -> {} target closed with error {:?}",
+            //                self.inner.peer_addr()?,
+            "CONNECT relay X -> X target closed with error {:?}",
+            //                outbound.peer_addr()?,
+            err,
+        ),
+        Either::Right((Ok(data), _)) => info!(
+            //                "CONNECT relay {} <- {} target closed ({} bytes consumed)",
+            //                self.inner.peer_addr()?,
+            "CONNECT relay X <- X target closed ({} bytes consumed)",
+            //                outbound.peer_addr()?,
+            data
+        ),
+        Either::Right((Err(err), _)) => error!(
+            //                "CONNECT relay {} <- {} target closed with error {:?}",
+            //                self.inner.peer_addr()?,
+            "CONNECT relay X <- X target closed with error {:?}",
+            //                outbound.peer_addr()?,
+            err,
+        ),
+    };
+
+    Ok(())
 }
 
-/// Allow us to implement all `&mut TcpStream's` functions to `Socks5Socket`
-impl std::ops::DerefMut for Socks5Socket {
-    fn deref_mut(&mut self) -> &mut TcpStream {
-        &mut self.inner
-    }
-}
+///// Allow us to implement all `TcpStream's` functions to `Socks5Socket`
+//impl<T> Deref for Socks5Socket<T> {
+//    type Target = T;
+//
+//    fn deref(&self) -> &T {
+//        // will actually point on struct's Vec
+//        &self.inner
+//    }
+//}
+//
+///// Allow us to implement all `&mut TcpStream's` functions to `Socks5Socket`
+//impl<T> std::ops::DerefMut for Socks5Socket<T> {
+//    fn deref_mut(&mut self) -> &mut T {
+//        &mut self.inner
+//    }
+//}
 
 #[cfg(test)]
 mod test {

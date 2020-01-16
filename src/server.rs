@@ -1,6 +1,6 @@
 use crate::read_exact;
-use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use crate::util::target_addr::read_address;
+use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use async_std::{
     future,
@@ -9,13 +9,11 @@ use async_std::{
     task::{Context as AsyncContext, Poll},
 };
 use futures::{
-    future::{try_join, try_select, Either, Future},
+    future::{Either, Future},
     stream::Stream,
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
-use std::borrow::Borrow;
 use std::io;
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 
 pub struct Config {
@@ -51,7 +49,6 @@ impl Authentication for SimpleUserPassword {
 impl Config {
     /// In seconds
     pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
-        assert!(n >= 0);
         self.request_timeout = n;
         self
     }
@@ -89,20 +86,25 @@ impl Socks5Server {
     }
 }
 
+/// `Incoming` implements [`futures::stream::Stream`].
 pub struct Incoming<'a>(&'a Socks5Server);
 
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
 impl<'a> Stream for Incoming<'a> {
-    type Item = Result<Socks5Socket>;
+    type Item = Result<Socks5Socket<TcpStream>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut AsyncContext<'_>) -> Poll<Option<Self::Item>> {
-        let mut fut = self.0.listener.accept();
+        let fut = self.0.listener.accept();
         // have to pin the future, otherwise can't poll it
         futures::pin_mut!(fut);
 
-        let (socket, _) = futures::ready!(fut.poll(cx))?;
-        debug!("accept ready, upgrading to socks...");
+        let (socket, peer_addr) = futures::ready!(fut.poll(cx))?;
+        let local_addr = socket.local_addr()?;
+        debug!(
+            "incoming connection from peer {} @ {}",
+            &peer_addr, &local_addr
+        );
 
         // Wrap the TcpStream into Socks5Socket
         let socket = Socks5Socket::new(socket, self.0.config.clone());
@@ -120,13 +122,13 @@ impl<'a> Stream for Incoming<'a> {
 }
 
 /// Wrap every TcpStream and contains Socks5 protocol implementation.
-pub struct Socks5Socket {
-    inner: TcpStream,
+pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
+    inner: T,
     config: Arc<Config>,
 }
 
-impl Socks5Socket {
-    pub fn new(socket: TcpStream, config: Arc<Config>) -> Socks5Socket {
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
+    pub fn new(socket: T, config: Arc<Config>) -> Self {
         Socks5Socket {
             inner: socket,
             config,
@@ -135,8 +137,8 @@ impl Socks5Socket {
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
-    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket> {
-        info!("Connected client: {}", self.inner.peer_addr()?);
+    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T>> {
+        //        info!("Connected client: {}", self.inner.peer_addr()?);
 
         // Handshake
         {
@@ -149,8 +151,8 @@ impl Socks5Socket {
             }
         }
 
-        let addr = match self.request().await {
-            Ok(socket_addr) => socket_addr,
+        match self.request().await {
+            Ok(_) => {}
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
                 self.reply(&e).await?;
@@ -196,7 +198,7 @@ impl Socks5Socket {
         // {METHODS available from the client}
         // eg. (non-auth) {0, 1}
         // eg. (auth)     {0, 1, 2}
-        let mut methods = read_exact!(self.inner, vec![0u8; methods_len as usize])
+        let methods = read_exact!(self.inner, vec![0u8; methods_len as usize])
             .context("Can't get methods.")?;
         debug!("methods supported sent by the client: {:?}", &methods);
 
@@ -278,7 +280,7 @@ impl Socks5Socket {
             )));
         }
 
-        let mut username =
+        let username =
             read_exact!(self.inner, vec![0u8; user_len as usize]).context("Can't get username.")?;
         debug!("username bytes: {:?}", &username);
 
@@ -292,7 +294,7 @@ impl Socks5Socket {
             )));
         }
 
-        let mut password =
+        let password =
             read_exact!(self.inner, vec![0u8; pass_len as usize]).context("Can't get password.")?;
         debug!("password bytes: {:?}", &password);
 
@@ -408,7 +410,7 @@ impl Socks5Socket {
         // TODO: timeout might not be appropriated in the case when we client wants to download a file
         //       (then the stream should last for more than 10s).
         //       Test by downloading a linux distro with curl & socks
-        let mut outbound = match future::timeout(
+        let outbound = match future::timeout(
             std::time::Duration::from_secs(self.config.request_timeout),
             TcpStream::connect(addr),
         )
@@ -426,7 +428,7 @@ impl Socks5Socket {
                 },
             },
             // Wrap timeout error in a proper ReplyError
-            Err(e) => Err(ReplyError::TtlExpired)?,
+            Err(_) => Err(ReplyError::TtlExpired)?,
         };
 
         debug!("Connected to remote destination");
@@ -450,67 +452,45 @@ impl Socks5Socket {
 
         trace!("Wrote success");
 
-        self.transfer(&mut outbound).await
-    }
-
-    /// Copy data between two peers
-    async fn transfer(&mut self, outbound: &mut TcpStream) -> Result<()> {
-        let (mut ri, mut wi) = (&self.inner, &self.inner);
-        let (mut ro, mut wo) = (&*outbound, &*outbound);
-
-        // Exchange data
-        // For some reasons, futures::future::select does not work with async_std::io::copy() 🤔
-        let inbound_to_outbound = futures::io::copy(&mut ri, &mut wo);
-        let outbound_to_inbound = futures::io::copy(&mut ro, &mut wi);
-
-        // We choose `select` over `join` because the inbound (client) is more likely to leave the connection open for a while,
-        // while it's not necessarily as the other part (outbound, aka remote server) has closed the communication.
-        let test = match futures::future::select(inbound_to_outbound, outbound_to_inbound).await {
-            Either::Left((Ok(data), _)) => info!(
-                "CONNECT relay {} -> {} target closed ({} bytes consumed)",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                data
-            ),
-            Either::Left((Err(err), _)) => error!(
-                "CONNECT relay {} -> {} target closed with error {:?}",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                err,
-            ),
-            Either::Right((Ok(data), _)) => info!(
-                "CONNECT relay {} <- {} target closed ({} bytes consumed)",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                data
-            ),
-            Either::Right((Err(err), _)) => error!(
-                "CONNECT relay {} <- {} target closed with error {:?}",
-                self.inner.peer_addr()?,
-                outbound.peer_addr()?,
-                err,
-            ),
-        };
-
-        Ok(())
+        transfer(&mut self.inner, outbound).await
     }
 }
 
-/// Allow us to implement all `TcpStream's` functions to `Socks5Socket`
-impl Deref for Socks5Socket {
-    type Target = TcpStream;
+/// Copy data between two peers
+/// Using 2 different generators, because they could be different structs with same traits.
+async fn transfer<I, O>(mut inbound: I, outbound: O) -> Result<()>
+where
+    I: AsyncRead + AsyncWrite + Unpin,
+    O: AsyncRead + AsyncWrite + Unpin,
+{
+    //    let (mut ri, mut wi) = (&inbound, &inbound);
+    let (mut ri, mut wi) = futures::io::AsyncReadExt::split(&mut inbound);
+    //    let (mut ro, mut wo) = (&outbound, &outbound);
+    let (mut ro, mut wo) = futures::io::AsyncReadExt::split(outbound);
 
-    fn deref(&self) -> &TcpStream {
-        // will actually point on struct's Vec
-        &self.inner
-    }
-}
+    // Exchange data
+    // For some reasons, futures::future::select does not work with async_std::io::copy() 🤔
+    let inbound_to_outbound = futures::io::copy(&mut ri, &mut wo);
+    let outbound_to_inbound = futures::io::copy(&mut ro, &mut wi);
 
-/// Allow us to implement all `&mut TcpStream's` functions to `Socks5Socket`
-impl std::ops::DerefMut for Socks5Socket {
-    fn deref_mut(&mut self) -> &mut TcpStream {
-        &mut self.inner
-    }
+    // I've chosen `select` over `join` because the inbound (client) is more likely to leave the connection open for a while,
+    // while it's not necessarily as the other part (outbound, aka remote server) has closed the communication.
+    match futures::future::select(inbound_to_outbound, outbound_to_inbound).await {
+        Either::Left((Ok(data), _)) => {
+            info!("local closed -> remote target ({} bytes consumed)", data)
+        }
+        Either::Left((Err(err), _)) => {
+            error!("local closed -> remote target with error {:?}", err,)
+        }
+        Either::Right((Ok(data), _)) => {
+            info!("local <- remote target closed ({} bytes consumed)", data)
+        }
+        Either::Right((Err(err), _)) => {
+            error!("local <- remote target closed with error {:?}", err,)
+        }
+    };
+
+    Ok(())
 }
 
 #[cfg(test)]

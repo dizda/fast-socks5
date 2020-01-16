@@ -2,6 +2,8 @@
 #[macro_use]
 extern crate log;
 
+use async_std::net::TcpListener;
+use async_std::sync::Arc;
 use async_std::{future::Future, stream::StreamExt, task};
 use fast_socks5::{
     server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
@@ -55,8 +57,10 @@ enum AuthMode {
 /// Useful read 3. https://blog.yoshuawuyts.com/streams-concurrency/
 /// error-libs benchmark: https://blog.yoshuawuyts.com/error-handling-survey/
 ///
+/// TODO: Command to use the socks server with a simple user/password
 /// TODO: Write functional tests: https://github.com/ark0f/async-socks5/blob/master/src/lib.rs#L762
 /// TODO: Write functional tests with cURL?
+/// TODO: Move this to as a standalone library
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -76,8 +80,10 @@ async fn spawn_socks_server() -> Result<()> {
         }
     }
 
-    let mut listener = Socks5Server::bind(&opt.listen_addr).await?;
-    listener.set_config(config);
+    let config = Arc::new(config);
+
+    let mut listener = TcpListener::bind(&opt.listen_addr).await?;
+    //    listener.set_config(config);
 
     let mut incoming = listener.incoming();
 
@@ -87,7 +93,15 @@ async fn spawn_socks_server() -> Result<()> {
     while let Some(socket_res) = incoming.next().await {
         match socket_res {
             Ok(socket) => {
+                info!("Connection from {}", socket.peer_addr()?);
+                let socket = Socks5Socket::new(socket, config.clone());
+
+                //                                socket.upgrade_to_socks5().await;
                 spawn_and_log_error(socket.upgrade_to_socks5());
+                //                match socket.upgrade_to_socks5().await {
+                //                    Ok(_) => {}
+                //                    Err(e) => error!("{:#}", &e),
+                //                }
             }
             Err(err) => {
                 error!("accept error = {:?}", err);

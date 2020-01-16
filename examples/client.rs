@@ -3,14 +3,9 @@
 extern crate log;
 
 use anyhow::Context;
-use async_std::net::{SocketAddr, ToSocketAddrs};
-use async_std::{
-    net::TcpStream,
-    task,
-    //    prelude::*,
-};
-use fast_socks5::{client::Socks5Stream, Result, SocksError};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
+use async_std::task;
+use fast_socks5::{client::Socks5Stream, Result};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use structopt::StructOpt;
 
 /// # How to use it:

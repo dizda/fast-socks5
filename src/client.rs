@@ -1,7 +1,7 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
-use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
+use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use futures::{task::Poll, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -11,6 +11,7 @@ use std::pin::Pin;
 const MAX_ADDR_LEN: usize = 260;
 
 /// A SOCKS5 client.
+/// `Socks5Stream` implements [`AsyncRead`] and [`AsyncWrite`].
 #[derive(Debug)]
 pub struct Socks5Stream {
     socket: TcpStream,

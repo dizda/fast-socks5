@@ -55,10 +55,8 @@ enum AuthMode {
 /// Useful read 3. https://blog.yoshuawuyts.com/streams-concurrency/
 /// error-libs benchmark: https://blog.yoshuawuyts.com/error-handling-survey/
 ///
-/// TODO: Command to use the socks server with a simple user/password
 /// TODO: Write functional tests: https://github.com/ark0f/async-socks5/blob/master/src/lib.rs#L762
 /// TODO: Write functional tests with cURL?
-/// TODO: Move this to as a standalone library
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -89,15 +87,7 @@ async fn spawn_socks_server() -> Result<()> {
     while let Some(socket_res) = incoming.next().await {
         match socket_res {
             Ok(socket) => {
-                //                let socket = Socks5Socket::new(socket, opt.request_timeout);
-                //                info!("Connection from {}", socket.peer_addr()?);
-
-                //                                socket.upgrade_to_socks5().await;
                 spawn_and_log_error(socket.upgrade_to_socks5());
-                //                match socket.upgrade_to_socks5().await {
-                //                    Ok(_) => {}
-                //                    Err(e) => error!("{:#}", &e),
-                //                }
             }
             Err(err) => {
                 error!("accept error = {:?}", err);

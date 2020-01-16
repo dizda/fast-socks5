@@ -30,19 +30,24 @@ Open in [crates.io](https://crates.io/crates/fast-socks5).
 
 ## Examples
 
-Please check `./examples/` directory.
+Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
 
 ```bash
 # Run client
-cargo run --example client
+RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a perdu.com -p 80
 
 # Run server
-cargo run --example server
+RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 password -u admin -p password
+
+# Test it with cURL
+curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
 ```
 
 ## TODO
 - Tests have to be implemented
 - Better Rust doc
+- Bind command not implemented
+- UDP command not implemented
 
 ## Inspired by
 

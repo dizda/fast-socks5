@@ -1,10 +1,10 @@
 use crate::read_exact;
-use crate::util::target_addr::read_address;
+use crate::util::target_addr::{read_address, TargetAddr};
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use async_std::{
     future,
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs},
     sync::Arc,
     task::{Context as AsyncContext, Poll},
 };
@@ -14,10 +14,13 @@ use futures::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
 use std::io;
+use std::net::ToSocketAddrs as StdToSocketAddrs;
 use std::pin::Pin;
 
 pub struct Config {
     request_timeout: u64,
+    execute_command: bool,
+    dns_resolve: bool,
     auth: Option<Arc<dyn Authentication>>,
 }
 
@@ -25,6 +28,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             request_timeout: 10,
+            execute_command: true,
+            dns_resolve: true,
             auth: None,
         }
     }
@@ -69,7 +74,7 @@ pub struct Socks5Server {
 }
 
 impl Socks5Server {
-    pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Socks5Server> {
+    pub async fn bind<A: AsyncToSocketAddrs>(addr: A) -> io::Result<Socks5Server> {
         let listener = TcpListener::bind(&addr).await?;
         let config = Arc::new(Config::default());
 
@@ -125,6 +130,8 @@ impl<'a> Stream for Incoming<'a> {
 pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
     inner: T,
     config: Arc<Config>,
+    auth: AuthenticationMethod,
+    target_addr: Option<TargetAddr>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
@@ -132,13 +139,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Socks5Socket {
             inner: socket,
             config,
+            auth: AuthenticationMethod::None,
+            target_addr: None,
         }
     }
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
     pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T>> {
-        //        info!("Connected client: {}", self.inner.peer_addr()?);
+        trace!("upgrading to socks5...");
 
         // Handshake
         {
@@ -147,7 +156,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             self.can_accept_method(methods).await?;
 
             if self.config.auth.is_some() {
-                self.authenticate().await?;
+                let credentials = self.authenticate().await?;
+                self.auth = AuthenticationMethod::Password {
+                    username: credentials.0,
+                    password: credentials.1,
+                };
             }
         }
 
@@ -263,7 +276,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Only called if
     ///  - the client supports authentication via username/password
     ///  - this server has `Authentication` trait implemented.
-    async fn authenticate(&mut self) -> Result<()> {
+    async fn authenticate(&mut self) -> Result<(String, String)> {
         trace!("Socks5Socket: authenticate()");
         let [version, user_len] =
             read_exact!(self.inner, [0u8; 2]).context("Can't read user len")?;
@@ -322,13 +335,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         info!("User `{}` logged successfully.", username);
 
         // Return methods available
-        Ok(())
+        Ok((username, password))
     }
 
     /// Wrapper to principally cover ReplyError types for both functions read & execute request.
     async fn request(&mut self) -> Result<()> {
-        let addr = self.read_request().await?;
-        self.execute_request(addr).await?;
+        self.read_command().await?;
+
+        if self.config.execute_command {
+            self.execute_command().await?;
+        }
 
         Ok(())
     }
@@ -369,7 +385,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     ///
     /// It the request is correct, it should returns a ['SocketAddr'].
     ///
-    async fn read_request(&mut self) -> Result<SocketAddr> {
+    async fn read_command(&mut self) -> Result<()> {
         let [version, cmd, rsv, address_type] =
             read_exact!(self.inner, [0u8; 4]).context("Malformed request")?;
         debug!(
@@ -389,7 +405,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         }
 
         // Guess address type
-        let addr = read_address(&mut self.inner, address_type)
+        let target_addr = read_address(&mut self.inner, address_type)
             .await
             .map_err(|e| {
                 // print explicit error
@@ -398,18 +414,37 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                 ReplyError::AddressTypeNotSupported
             })?;
 
-        debug!("Request target is {}", addr);
+        // decide whether we have to resolve DNS or not
+        self.target_addr = match (&target_addr, self.config.dns_resolve) {
+            (TargetAddr::Domain(_, _), true) => Some(target_addr.resolve_dns().await?),
+            (TargetAddr::Domain(_, _), false) => {
+                // don't resolve DNS, leave it like that, the other end should resolve it
+                debug!("DNS hasn't been resolved because `dns_resolve`'s flag is off.");
 
-        Ok(addr)
+                Some(target_addr)
+            }
+            (TargetAddr::Ip(_), _) => Some(target_addr),
+        };
+
+        debug!("Request target is {}", self.target_addr.as_ref().unwrap());
+
+        Ok(())
     }
 
     /// Connect to the target address that the client wants,
     /// then forward the data between them (client <=> target address).
-    async fn execute_request(&mut self, addr: SocketAddr) -> Result<()> {
+    async fn execute_command(&mut self) -> Result<()> {
+        // async-std's ToSocketAddrs doesn't supports external trait implementation
+        // @see https://github.com/async-rs/async-std/issues/539
+        let addr = self
+            .target_addr
+            .as_ref()
+            .context("target_addr empty")?
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        // TODO: timeout might not be appropriated in the case when we client wants to download a file
-        //       (then the stream should last for more than 10s).
-        //       Test by downloading a linux distro with curl & socks
         let outbound = match future::timeout(
             std::time::Duration::from_secs(self.config.request_timeout),
             TcpStream::connect(addr),

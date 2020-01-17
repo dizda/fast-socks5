@@ -1,9 +1,11 @@
-use crate::read_exact;
 use crate::consts;
+use crate::read_exact;
 use anyhow::Context;
 use async_std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use futures::{AsyncRead, AsyncReadExt};
+use std::fmt;
 use std::io;
+use std::vec::IntoIter;
 use thiserror::Error;
 
 /// SOCKS5 reply code
@@ -39,6 +41,61 @@ pub enum TargetAddr {
     /// The domain name will be passed along to the proxy server and DNS lookup
     /// will happen there.
     Domain(String, u16),
+}
+
+impl TargetAddr {
+    pub async fn resolve_dns(self) -> anyhow::Result<TargetAddr> {
+        match self {
+            TargetAddr::Ip(ip) => Ok(TargetAddr::Ip(ip)),
+            TargetAddr::Domain(domain, port) => {
+                debug!("Attempt to DNS resolve the domain {}...", &domain);
+                let socket_addr = (&domain[..], port)
+                    .to_socket_addrs()
+                    .await
+                    .context(AddrError::DNSResolutionFailed)?
+                    .next()
+                    .ok_or(AddrError::Custom(
+                        "Can't fetch DNS to the domain.".to_string(),
+                    ))?;
+
+                // has been converted to an ip
+                Ok(TargetAddr::Ip(socket_addr))
+            }
+        }
+    }
+
+    pub fn is_ip(&self) -> bool {
+        match self {
+            TargetAddr::Ip(_) => true,
+            _ => false,
+        }
+    }
+}
+
+// async-std ToSocketAddrs doesn't supports external trait implementation
+// @see https://github.com/async-rs/async-std/issues/539
+impl std::net::ToSocketAddrs for TargetAddr {
+    type Iter = IntoIter<SocketAddr>;
+
+    fn to_socket_addrs(&self) -> io::Result<IntoIter<SocketAddr>> {
+        match *self {
+            TargetAddr::Ip(addr) => Ok(vec![addr].into_iter()),
+            TargetAddr::Domain(_, _) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Domain name has to be explicitly resolved, please use TargetAddr::resolve_dns().",
+            )),
+        }
+    }
+}
+
+impl fmt::Display for TargetAddr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            TargetAddr::Ip(ref addr) => write!(f, "{}", addr),
+            TargetAddr::Domain(ref addr, ref port) => write!(f, "{}:{}", addr, port),
+        }
+    }
 }
 
 /// A trait for objects that can be converted to `TargetAddr`.
@@ -103,7 +160,7 @@ pub enum Addr {
 pub async fn read_address<T: AsyncRead + Unpin>(
     stream: &mut T,
     atyp: u8,
-) -> anyhow::Result<SocketAddr> {
+) -> anyhow::Result<TargetAddr> {
     let addr = match atyp {
         consts::SOCKS5_ADDR_TYPE_IPV4 => {
             debug!("Address type `IPv4`");
@@ -131,22 +188,11 @@ pub async fn read_address<T: AsyncRead + Unpin>(
     // Convert (u8 * 2) into u16
     let port = (port[0] as u16) << 8 | port[1] as u16;
 
-    // Merge ADDRESS + PORT into a SocketAddr that can be use by TCP Connect
-    let addr: SocketAddr = match addr {
-        Addr::V4([a, b, c, d]) => SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port).into(),
-        Addr::V6(x) => SocketAddrV6::new(Ipv6Addr::from(x), port, 0, 0).into(),
-        Addr::Domain(domain) => {
-            debug!("Attempt to DNS resolve the domain {}...", &domain);
-            // DNS resolution for domain names
-            (&domain[..], port)
-                .to_socket_addrs()
-                .await
-                .context(AddrError::DNSResolutionFailed)?
-                .next()
-                .ok_or(AddrError::Custom(
-                    "Can't fetch DNS to the domain.".to_string(),
-                ))?
-        }
+    // Merge ADDRESS + PORT into a TargetAddr
+    let addr: TargetAddr = match addr {
+        Addr::V4([a, b, c, d]) => (Ipv4Addr::new(a, b, c, d), port).to_target_addr()?,
+        Addr::V6(x) => (Ipv6Addr::from(x), port).to_target_addr()?,
+        Addr::Domain(domain) => TargetAddr::Domain(domain, port),
     };
 
     Ok(addr)

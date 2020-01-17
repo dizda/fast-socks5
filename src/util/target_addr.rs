@@ -57,6 +57,7 @@ impl TargetAddr {
                     .ok_or(AddrError::Custom(
                         "Can't fetch DNS to the domain.".to_string(),
                     ))?;
+                debug!("domain name resolved to {}", socket_addr);
 
                 // has been converted to an ip
                 Ok(TargetAddr::Ip(socket_addr))

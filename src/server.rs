@@ -357,6 +357,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     async fn request(&mut self) -> Result<()> {
         self.read_command().await?;
 
+        if self.config.dns_resolve {
+            self.resolve_dns().await?;
+        } else {
+            debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
+        }
+
         if self.config.execute_command {
             self.execute_command().await?;
         }
@@ -429,19 +435,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                 ReplyError::AddressTypeNotSupported
             })?;
 
-        // decide whether we have to resolve DNS or not
-        self.target_addr = match (&target_addr, self.config.dns_resolve) {
-            (TargetAddr::Domain(_, _), true) => Some(target_addr.resolve_dns().await?),
-            (TargetAddr::Domain(_, _), false) => {
-                // don't resolve DNS, leave it like that, the other end should resolve it
-                debug!("DNS hasn't been resolved because `dns_resolve`'s flag is off.");
-
-                Some(target_addr)
-            }
-            (TargetAddr::Ip(_), _) => Some(target_addr),
-        };
+        self.target_addr = Some(target_addr);
 
         debug!("Request target is {}", self.target_addr.as_ref().unwrap());
+
+        Ok(())
+    }
+
+    /// This function is public, it can be call manually on your own-willing
+    /// if config flag has been turned off: `Config::dns_resolve == false`.
+    pub async fn resolve_dns(&mut self) -> Result<()> {
+        trace!("resolving dns");
+        if let Some(target_addr) = self.target_addr.take() {
+            // decide whether we have to resolve DNS or not
+            self.target_addr = match target_addr {
+                TargetAddr::Domain(_, _) => Some(target_addr.resolve_dns().await?),
+                TargetAddr::Ip(_) => Some(target_addr),
+            };
+        }
 
         Ok(())
     }
@@ -507,6 +518,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
     pub fn target_addr(&self) -> Option<&TargetAddr> {
         self.target_addr.as_ref()
+    }
+
+    pub fn auth(&self) -> &AuthenticationMethod {
+        &self.auth
     }
 }
 

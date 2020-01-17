@@ -17,6 +17,7 @@ use std::io;
 use std::net::ToSocketAddrs as StdToSocketAddrs;
 use std::pin::Pin;
 
+#[derive(Clone)]
 pub struct Config {
     request_timeout: u64,
     execute_command: bool,
@@ -61,8 +62,22 @@ impl Config {
     /// Enable authentication
     /// 'static lifetime for Authentication avoid us to use `dyn Authentication`
     /// and set the Arc before calling the function.
-    pub fn set_authentication<T: Authentication + 'static>(&mut self, authentication: T) {
+    pub fn set_authentication<T: Authentication + 'static>(
+        &mut self,
+        authentication: T,
+    ) -> &mut Self {
         self.auth = Some(Arc::new(authentication));
+        self
+    }
+
+    pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
+        self.execute_command = value;
+        self
+    }
+
+    pub fn set_dns_resolve(&mut self, value: bool) -> &mut Self {
+        self.dns_resolve = value;
+        self
     }
 }
 
@@ -489,6 +504,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         transfer(&mut self.inner, outbound).await
     }
+
+    pub fn target_addr(&self) -> Option<&TargetAddr> {
+        self.target_addr.as_ref()
+    }
 }
 
 /// Copy data between two peers
@@ -526,6 +545,48 @@ where
     };
 
     Ok(())
+}
+
+/// Allow us to read directly from the struct
+impl<T> AsyncRead for Socks5Socket<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_read(context, buf)
+    }
+}
+
+/// Allow us to write directly into the struct
+impl<T> AsyncWrite for Socks5Socket<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(context, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_close(context)
+    }
 }
 
 #[cfg(test)]

@@ -13,61 +13,20 @@ const MAX_ADDR_LEN: usize = 260;
 /// A SOCKS5 client.
 /// `Socks5Stream` implements [`AsyncRead`] and [`AsyncWrite`].
 #[derive(Debug)]
-pub struct Socks5Stream {
-    socket: TcpStream,
+pub struct Socks5Stream<S: AsyncRead + AsyncWrite + Unpin> {
+    socket: S,
     target_addr: TargetAddr,
 }
 
-impl Socks5Stream {
-    /// Connects to a target server through a SOCKS5 proxy.
-    pub async fn connect<T>(socks_server: T, target_addr: String, target_port: u16) -> Result<Self>
-    where
-        T: ToSocketAddrs,
-    {
-        Self::connect_raw(socks_server, target_addr, target_port, None).await
-    }
-
-    pub async fn connect_with_password<T>(
-        socks_server: T,
-        target_addr: String,
-        target_port: u16,
-        username: String,
-        password: String,
-    ) -> Result<Self>
-    where
-        T: ToSocketAddrs,
-    {
-        let auth = AuthenticationMethod::Password { username, password };
-
-        Self::connect_raw(socks_server, target_addr, target_port, Some(auth)).await
-    }
-
-    /// Process clients SOCKS requests
-    /// This is the entry point where a whole request is processed.
-    async fn connect_raw<T>(
-        socks_server: T,
-        target_addr: String,
-        target_port: u16,
-        auth: Option<AuthenticationMethod>,
-    ) -> Result<Self>
-    where
-        T: ToSocketAddrs,
-    {
-        let socket = TcpStream::connect(&socks_server).await?;
-        info!("Connected @ {}", &socket.peer_addr()?);
-
-        // Auth none is always used by default.
-        let mut methods = vec![AuthenticationMethod::None];
-
-        if let Some(method) = auth {
-            methods.push(method);
-        }
-
-        // Specify the target, here domain name, dns will be resolved on the server side
-        let target_addr = (target_addr.as_str(), target_port)
-            .to_target_addr()
-            .context("Can't convert address to TargetAddr format")?;
-
+impl<S> Socks5Stream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    pub async fn use_stream(
+        socket: S,
+        target_addr: TargetAddr,
+        methods: Vec<AuthenticationMethod>,
+    ) -> Result<Self> {
         let mut stream = Socks5Stream {
             socket,
             target_addr,
@@ -81,7 +40,6 @@ impl Socks5Stream {
         info!("Requesting headers `{:?}`...", &stream.target_addr);
         stream.request_header().await?;
         stream.read_request_reply().await?;
-        //        request_body(&mut stream, domain).await?;
 
         Ok(stream)
     }
@@ -347,8 +305,68 @@ impl Socks5Stream {
     }
 }
 
+impl Socks5Stream<TcpStream> {
+    /// Connects to a target server through a SOCKS5 proxy.
+    pub async fn connect<T>(socks_server: T, target_addr: String, target_port: u16) -> Result<Self>
+    where
+        T: ToSocketAddrs,
+    {
+        Self::connect_raw(socks_server, target_addr, target_port, None).await
+    }
+
+    pub async fn connect_with_password<T>(
+        socks_server: T,
+        target_addr: String,
+        target_port: u16,
+        username: String,
+        password: String,
+    ) -> Result<Self>
+    where
+        T: ToSocketAddrs,
+    {
+        let auth = AuthenticationMethod::Password { username, password };
+
+        Self::connect_raw(socks_server, target_addr, target_port, Some(auth)).await
+    }
+
+    /// Process clients SOCKS requests
+    /// This is the entry point where a whole request is processed.
+    async fn connect_raw<T>(
+        socks_server: T,
+        target_addr: String,
+        target_port: u16,
+        auth: Option<AuthenticationMethod>,
+    ) -> Result<Self>
+    where
+        T: ToSocketAddrs,
+    {
+        let socket = TcpStream::connect(&socks_server).await?;
+        info!("Connected @ {}", &socket.peer_addr()?);
+
+        // Auth none is always used by default.
+        let mut methods = vec![AuthenticationMethod::None];
+
+        if let Some(method) = auth {
+            methods.push(method);
+        }
+
+        // Specify the target, here domain name, dns will be resolved on the server side
+        let target_addr = (target_addr.as_str(), target_port)
+            .to_target_addr()
+            .context("Can't convert address to TargetAddr format")?;
+
+        let socks_stream = Self::use_stream(socket, target_addr, methods).await?;
+        //        request_body(&mut stream, domain).await?;
+
+        Ok(socks_stream)
+    }
+}
+
 /// Allow us to read directly from the struct
-impl AsyncRead for Socks5Stream {
+impl<S> AsyncRead for Socks5Stream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
@@ -359,7 +377,10 @@ impl AsyncRead for Socks5Stream {
 }
 
 /// Allow us to write directly into the struct
-impl AsyncWrite for Socks5Stream {
+impl<S> AsyncWrite for Socks5Stream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     fn poll_write(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,

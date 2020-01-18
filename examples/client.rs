@@ -4,6 +4,7 @@ extern crate log;
 
 use anyhow::Context;
 use async_std::task;
+use fast_socks5::client::Config;
 use fast_socks5::{client::Socks5Stream, Result};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use structopt::StructOpt;
@@ -39,6 +40,10 @@ struct Opt {
 
     #[structopt(long)]
     pub password: Option<String>,
+
+    /// Don't perform the auth handshake, send directly the command request
+    #[structopt(short = "k", long)]
+    pub skip_auth: bool,
 }
 
 fn main() -> Result<()> {
@@ -51,6 +56,8 @@ async fn spawn_socks_client() -> Result<()> {
     let opt: Opt = Opt::from_args();
     let domain = opt.target_addr.clone();
     let mut socks;
+    let mut config = Config::default();
+    config.set_skip_auth(opt.skip_auth);
 
     // Creating a SOCKS stream to the target address thru the socks server
     if opt.username.is_some() {
@@ -60,10 +67,12 @@ async fn spawn_socks_client() -> Result<()> {
             opt.target_port,
             opt.username.unwrap(),
             opt.password.expect("Please fill the password"),
+            config,
         )
         .await?;
     } else {
-        socks = Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port).await?;
+        socks = Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port, config)
+            .await?;
     }
 
     // Once connection is completed, can start to communicate with the server

@@ -5,7 +5,7 @@ extern crate log;
 use async_std::{future::Future, stream::StreamExt, task};
 use fast_socks5::{
     server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
-    Result,
+    Result, SocksError,
 };
 use futures::{AsyncRead, AsyncWrite};
 use structopt::StructOpt;
@@ -35,6 +35,10 @@ struct Opt {
     /// Choose authentication type
     #[structopt(subcommand, name = "auth")] // Note that we mark a field as a subcommand
     pub auth: AuthMode,
+
+    /// Don't perform the auth handshake, send directly the command request
+    #[structopt(short = "k", long)]
+    pub skip_auth: bool,
 }
 
 /// Choose the authentication type
@@ -67,10 +71,17 @@ async fn spawn_socks_server() -> Result<()> {
     let opt: Opt = Opt::from_args();
     let mut config = Config::default();
     config.set_request_timeout(opt.request_timeout);
+    config.set_skip_auth(opt.skip_auth);
 
     match opt.auth {
         AuthMode::NoAuth => warn!("No authentication has been set!"),
         AuthMode::Password { username, password } => {
+            if opt.skip_auth {
+                return Err(SocksError::ArgumentInputError(
+                    "Can't use skip-auth flag and authentication altogether.",
+                ))?;
+            }
+
             config.set_authentication(SimpleUserPassword { username, password });
             info!("Simple auth system has been set.");
         }

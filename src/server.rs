@@ -19,9 +19,14 @@ use std::pin::Pin;
 
 #[derive(Clone)]
 pub struct Config {
+    /// Timeout of the command request
     request_timeout: u64,
-    execute_command: bool,
+    /// Avoid useless roundtrips if we don't need the Authentication layer
+    skip_auth: bool,
+    /// Enable dns-resolving
     dns_resolve: bool,
+    /// Enable command execution
+    execute_command: bool,
     auth: Option<Arc<dyn Authentication>>,
 }
 
@@ -29,8 +34,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             request_timeout: 10,
-            execute_command: true,
+            skip_auth: false,
             dns_resolve: true,
+            execute_command: true,
             auth: None,
         }
     }
@@ -56,6 +62,11 @@ impl Config {
     /// In seconds
     pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
         self.request_timeout = n;
+        self
+    }
+
+    pub fn set_skip_auth(&mut self, value: bool) -> &mut Self {
+        self.skip_auth = value;
         self
     }
 
@@ -165,7 +176,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         trace!("upgrading to socks5...");
 
         // Handshake
-        {
+        if self.config.skip_auth == false {
             let methods = self.get_methods().await?;
 
             self.can_accept_method(methods).await?;
@@ -177,6 +188,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                     password: credentials.1,
                 };
             }
+        } else {
+            debug!("skipping auth");
         }
 
         match self.request().await {

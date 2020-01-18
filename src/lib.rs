@@ -89,7 +89,6 @@ impl fmt::Display for AuthenticationMethod {
 
 #[derive(Error, Debug)]
 pub enum SocksError {
-    /// An underlying I/O error occured.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
     #[error("request timeout: {0}")]
@@ -113,8 +112,8 @@ pub enum SocksError {
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
 
-    //    #[error("Argument input error: `{0}`.")]
-    //    ArgumentInputError(&'static str),
+    #[error("Argument input error: `{0}`.")]
+    ArgumentInputError(&'static str),
 
     //    #[error("Other: `{0}`.")]
     #[error(transparent)]

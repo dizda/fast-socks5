@@ -19,9 +19,14 @@ use std::pin::Pin;
 
 #[derive(Clone)]
 pub struct Config {
+    /// Timeout of the command request
     request_timeout: u64,
-    execute_command: bool,
+    /// Avoid useless roundtrips if we don't need the Authentication layer
+    skip_auth: bool,
+    /// Enable dns-resolving
     dns_resolve: bool,
+    /// Enable command execution
+    execute_command: bool,
     auth: Option<Arc<dyn Authentication>>,
 }
 
@@ -29,13 +34,15 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             request_timeout: 10,
-            execute_command: true,
+            skip_auth: false,
             dns_resolve: true,
+            execute_command: true,
             auth: None,
         }
     }
 }
 
+/// Use this trait to handle a custom authentication on your end.
 pub trait Authentication: Send + Sync {
     fn authenticate(&self, username: &str, password: &str) -> bool;
 }
@@ -53,9 +60,16 @@ impl Authentication for SimpleUserPassword {
 }
 
 impl Config {
-    /// In seconds
+    /// How much time it should wait until the request timeout.
     pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
         self.request_timeout = n;
+        self
+    }
+
+    /// Skip the entire auth/handshake part, which means the server will directly wait for
+    /// the command request.
+    pub fn set_skip_auth(&mut self, value: bool) -> &mut Self {
+        self.skip_auth = value;
         self
     }
 
@@ -70,11 +84,13 @@ impl Config {
         self
     }
 
+    /// Set whether or not to execute commands
     pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
         self.execute_command = value;
         self
     }
 
+    /// Will the server perform dns resolve
     pub fn set_dns_resolve(&mut self, value: bool) -> &mut Self {
         self.dns_resolve = value;
         self
@@ -101,6 +117,7 @@ impl Socks5Server {
         self.config = Arc::new(config);
     }
 
+    /// Can loop on `incoming().next()` to iterate over incoming connections.
     pub fn incoming(&self) -> Incoming<'_> {
         Incoming(self)
     }
@@ -128,20 +145,12 @@ impl<'a> Stream for Incoming<'a> {
 
         // Wrap the TcpStream into Socks5Socket
         let socket = Socks5Socket::new(socket, self.0.config.clone());
-        //        socket.write(&[4]);
-        //        let mut socket = Socks5Socket::new(socket);
-        //        let fut = socket.upgrade_to_socks5();
-        //        futures::pin_mut!(fut);
-        //
-        //        debug!("upgrading to socks...");
-        //        let socket = futures::ready!(fut.poll(cx))?;
-        //        debug!("upgraded ok.");
 
         Poll::Ready(Some(Ok(socket)))
     }
 }
 
-/// Wrap every TcpStream and contains Socks5 protocol implementation.
+/// Wrap TcpStream and contains Socks5 protocol implementation.
 pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
     inner: T,
     config: Arc<Config>,
@@ -165,7 +174,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         trace!("upgrading to socks5...");
 
         // Handshake
-        {
+        if self.config.skip_auth == false {
             let methods = self.get_methods().await?;
 
             self.can_accept_method(methods).await?;
@@ -177,6 +186,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                     password: credentials.1,
                 };
             }
+        } else {
+            debug!("skipping auth");
         }
 
         match self.request().await {
@@ -193,7 +204,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(self)
     }
 
-    /// Decide to whether or not, accept the authentication method
+    /// Read the authentication method provided by the client.
     /// A client send a list of methods that he supports, he could send
     ///
     ///   - 0: Non auth
@@ -252,7 +263,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     ///     eg. (non-acceptable)  {5, 0xff}
     ///
     async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<()> {
-        let is_supported;
         let method_supported;
 
         if self.config.auth.is_some() {
@@ -261,9 +271,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
         }
 
-        is_supported = client_methods.contains(&method_supported);
-
-        if !is_supported {
+        if !client_methods.contains(&method_supported) {
             debug!("Don't support this auth method, reply with (0xff)");
             self.inner
                 .write(&[
@@ -349,7 +357,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         info!("User `{}` logged successfully.", username);
 
-        // Return methods available
         Ok((username, password))
     }
 
@@ -370,6 +377,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(())
     }
 
+    /// Reply to the client with the correct reply code according to the RFC.
     async fn reply(&mut self, error: &ReplyError) -> Result<()> {
         let reply = &[
             consts::SOCKS5_VERSION,

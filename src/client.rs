@@ -10,31 +10,68 @@ use std::pin::Pin;
 
 const MAX_ADDR_LEN: usize = 260;
 
+#[derive(Debug)]
+pub struct Config {
+    /// Avoid useless roundtrips if we don't need the Authentication layer
+    /// make sure to also activate it on the server side.
+    skip_auth: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { skip_auth: false }
+    }
+}
+
+impl Config {
+    pub fn set_skip_auth(&mut self, value: bool) -> &mut Self {
+        self.skip_auth = value;
+        self
+    }
+}
+
 /// A SOCKS5 client.
 /// `Socks5Stream` implements [`AsyncRead`] and [`AsyncWrite`].
 #[derive(Debug)]
 pub struct Socks5Stream<S: AsyncRead + AsyncWrite + Unpin> {
     socket: S,
     target_addr: TargetAddr,
+    config: Config,
 }
 
 impl<S> Socks5Stream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Possibility to use a stream already created rather than
+    /// creating a whole new `TcpStream::connect()`.
     pub async fn use_stream(
         socket: S,
         target_addr: TargetAddr,
-        methods: Vec<AuthenticationMethod>,
+        auth: Option<AuthenticationMethod>,
+        config: Config,
     ) -> Result<Self> {
         let mut stream = Socks5Stream {
             socket,
             target_addr,
+            config,
         };
 
+        // Auth none is always used by default.
+        let mut methods = vec![AuthenticationMethod::None];
+
+        if let Some(method) = auth {
+            // add any other method if supplied
+            methods.push(method);
+        }
+
         // Handshake Lifecycle
-        let methods = stream.send_version_and_methods(methods).await?;
-        stream.which_method_accepted(methods).await?;
+        if stream.config.skip_auth == false {
+            let methods = stream.send_version_and_methods(methods).await?;
+            stream.which_method_accepted(methods).await?;
+        } else {
+            debug!("skipping auth");
+        }
 
         // Request Lifecycle
         info!("Requesting headers `{:?}`...", &stream.target_addr);
@@ -133,14 +170,6 @@ where
             }
         }
 
-        //                      {SOCKS Version, Authentication chosen}
-        // eg. (non-auth)       {5, 0}
-        // eg. (auth)           {5, 2}
-        // eg. (non-acceptable) {5, 0xff}
-        //    debug!("Reply with method auth-none (0x00)");
-        //    stream
-        //        .write(&[consts::SOCKS5_VERSION, consts::SOCKS5_AUTH_METHOD_NONE])
-        //        .await?;
         Ok(())
     }
 
@@ -207,7 +236,6 @@ where
     ///          | 1  |  1  |   1   |  1   | Variable |    2     |
     ///          +----+-----+-------+------+----------+----------+
     ///
-    /// It the request is correct, it should returns a ['SocketAddr'].
     ///
     /// # Help
     ///
@@ -299,34 +327,42 @@ where
         }
 
         let address = read_address(&mut self.socket, address_type).await?;
-        info!("Server connected to {}.", address);
+        info!("Remote server connected to {}.", address);
 
         Ok(())
     }
 }
 
+/// Api if you want to use TcpStream to create a new connection to the SOCKS5 server.
 impl Socks5Stream<TcpStream> {
     /// Connects to a target server through a SOCKS5 proxy.
-    pub async fn connect<T>(socks_server: T, target_addr: String, target_port: u16) -> Result<Self>
+    pub async fn connect<T>(
+        socks_server: T,
+        target_addr: String,
+        target_port: u16,
+        config: Config,
+    ) -> Result<Self>
     where
         T: ToSocketAddrs,
     {
-        Self::connect_raw(socks_server, target_addr, target_port, None).await
+        Self::connect_raw(socks_server, target_addr, target_port, None, config).await
     }
 
+    /// Connect with credentials
     pub async fn connect_with_password<T>(
         socks_server: T,
         target_addr: String,
         target_port: u16,
         username: String,
         password: String,
+        config: Config,
     ) -> Result<Self>
     where
         T: ToSocketAddrs,
     {
         let auth = AuthenticationMethod::Password { username, password };
 
-        Self::connect_raw(socks_server, target_addr, target_port, Some(auth)).await
+        Self::connect_raw(socks_server, target_addr, target_port, Some(auth), config).await
     }
 
     /// Process clients SOCKS requests
@@ -336,6 +372,7 @@ impl Socks5Stream<TcpStream> {
         target_addr: String,
         target_port: u16,
         auth: Option<AuthenticationMethod>,
+        config: Config,
     ) -> Result<Self>
     where
         T: ToSocketAddrs,
@@ -343,20 +380,13 @@ impl Socks5Stream<TcpStream> {
         let socket = TcpStream::connect(&socks_server).await?;
         info!("Connected @ {}", &socket.peer_addr()?);
 
-        // Auth none is always used by default.
-        let mut methods = vec![AuthenticationMethod::None];
-
-        if let Some(method) = auth {
-            methods.push(method);
-        }
-
         // Specify the target, here domain name, dns will be resolved on the server side
         let target_addr = (target_addr.as_str(), target_port)
             .to_target_addr()
             .context("Can't convert address to TargetAddr format")?;
 
-        let socks_stream = Self::use_stream(socket, target_addr, methods).await?;
-        //        request_body(&mut stream, domain).await?;
+        // upgrade the TcpStream to Socks5Stream
+        let socks_stream = Self::use_stream(socket, target_addr, auth, config).await?;
 
         Ok(socks_stream)
     }

@@ -18,12 +18,16 @@
   - No-Auth method
   - Username/Password auth method
   - Custom auth methods can be implemented via the Authentication Trait
-- All SOCKS5 errors (replies) should be mapped
-- AsyncRead + AsyncWrite traits are implemented on Socks5Stream
-- IPv4, IPv6, and Domains types are supported
+- All SOCKS5 RFC errors (replies) should be mapped
+- `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
+- `IPv4`, `IPv6`, and `Domains` types are supported
 - Config helper for Socks5Server
 - Helpers to run a Socks5Server à la *"async-std's TcpStream"* via `incoming.next().await`
 - Examples come with real cases commands scenarios
+- Can disable `DNS resolving`
+- Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in an already authenticated environment)
+- Can disable command execution (useful if you just want to forward the request to an another server)
+
 
 ## Install
 

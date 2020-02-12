@@ -540,6 +540,8 @@ where
     I: AsyncRead + AsyncWrite + Unpin,
     O: AsyncRead + AsyncWrite + Unpin,
 {
+    //TODO: use TcpStream.clone() https://github.com/async-rs/async-std/pull/689/files#diff-633608b66cafdfb86435918f3a48bea5R17
+
     //    let (mut ri, mut wi) = (&inbound, &inbound);
     let (mut ri, mut wi) = futures::io::AsyncReadExt::split(&mut inbound);
     //    let (mut ro, mut wo) = (&outbound, &outbound);

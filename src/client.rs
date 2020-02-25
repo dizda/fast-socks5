@@ -105,7 +105,7 @@ where
             consts::SOCKS5_VERSION,
             methods.len()
         );
-        // read the first 2 bytes which contains the SOCKS version and the methods len()
+        // write the first 2 bytes which contains the SOCKS version and the methods len()
         self.socket
             .write(&[consts::SOCKS5_VERSION, methods.len() as u8])
             .await
@@ -208,7 +208,7 @@ where
 
         // Check the server reply, if whether it approved the auth or not
         let [version, is_success] =
-            read_exact!(self.socket, [0u8; 2]).context("Can't read user len")?;
+            read_exact!(self.socket, [0u8; 2]).context("Can't read is_success")?;
         debug!(
             "Auth: [version: {version}, is_success: {is_success}]",
             version = version,

@@ -13,7 +13,7 @@
 /// # Examples (after)
 ///
 /// ```
-/// let [version, method_len] = read_exact!(stream, [0u8; 4]);
+/// let [version, method_len] = read_exact!(stream, [0u8; 2]);
 ///
 /// assert_eq!(version, 0x05);
 /// ```

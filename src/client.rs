@@ -331,6 +331,18 @@ where
 
         Ok(())
     }
+
+    pub fn get_socket(self) -> S {
+        self.socket
+    }
+
+    pub fn get_socket_ref(&self) -> &S {
+        &self.socket
+    }
+
+    pub fn get_socket_mut(&mut self) -> &mut S {
+        &mut self.socket
+    }
 }
 
 /// Api if you want to use TcpStream to create a new connection to the SOCKS5 server.

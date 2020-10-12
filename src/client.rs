@@ -297,9 +297,14 @@ where
         // we limit the end of the packet right after the domain + port number, we don't need to print
         // useless 0 bytes, otherwise other protocol won't understand the request (like HTTP servers).
         self.socket
-            .write_all(&packet[..padding])
+            .write(&packet[..padding])
             .await
             .context("Can't write request header's packet.")?;
+
+        self.socket
+            .flush()
+            .await
+            .context("Can't flush request header's packet")?;
 
         Ok(())
     }

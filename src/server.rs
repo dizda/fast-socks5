@@ -398,6 +398,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .await
             .context("Can't write the reply!")?;
 
+        self.inner.flush().await.context("Can't flush the reply!")?;
+
         Ok(())
     }
 
@@ -504,7 +506,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         // TODO: convert this to the real address
         self.inner
-            .write_all(&[
+            .write(&[
                 consts::SOCKS5_VERSION,
                 consts::SOCKS5_REPLY_SUCCEEDED,
                 0x00, // reserved
@@ -519,7 +521,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .await
             .context("Can't write successful reply")?;
 
-        trace!("Wrote success");
+        self.inner.flush().await.context("Can't flush the reply!")?;
+
+        debug!("Wrote success");
 
         transfer(&mut self.inner, outbound).await
     }

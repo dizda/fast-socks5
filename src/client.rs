@@ -35,7 +35,7 @@ impl Config {
 #[derive(Debug)]
 pub struct Socks5Stream<S: AsyncRead + AsyncWrite + Unpin> {
     socket: S,
-    target_addr: TargetAddr,
+    target_addr: Option<TargetAddr>,
     config: Config,
 }
 
@@ -47,14 +47,13 @@ where
     /// creating a whole new `TcpStream::connect()`.
     pub async fn use_stream(
         socket: S,
-        target_addr: TargetAddr,
         auth: Option<AuthenticationMethod>,
         config: Config,
     ) -> Result<Self> {
         let mut stream = Socks5Stream {
             socket,
-            target_addr,
             config,
+            target_addr: None,
         };
 
         // Auth none is always used by default.
@@ -73,12 +72,18 @@ where
             debug!("skipping auth");
         }
 
-        // Request Lifecycle
-        info!("Requesting headers `{:?}`...", &stream.target_addr);
-        stream.request_header().await?;
-        stream.read_request_reply().await?;
-
         Ok(stream)
+    }
+
+    pub async fn request(&mut self, target_addr: TargetAddr) -> Result<()> {
+        self.target_addr = Some(target_addr);
+
+        // Request Lifecycle
+        info!("Requesting headers `{:?}`...", &self.target_addr);
+        self.request_header().await?;
+        self.read_request_reply().await?;
+
+        Ok(())
     }
 
     /// Decide to whether or not, accept the authentication method
@@ -255,7 +260,11 @@ where
             0x00,
         ]);
 
-        match self.target_addr {
+        match self
+            .target_addr
+            .as_ref()
+            .context("target addr should be present")?
+        {
             TargetAddr::Ip(SocketAddr::V4(addr)) => {
                 debug!("TargetAddr::IpV4");
                 padding = 10;
@@ -403,7 +412,8 @@ impl Socks5Stream<TcpStream> {
             .context("Can't convert address to TargetAddr format")?;
 
         // upgrade the TcpStream to Socks5Stream
-        let socks_stream = Self::use_stream(socket, target_addr, auth, config).await?;
+        let mut socks_stream = Self::use_stream(socket, auth, config).await?;
+        socks_stream.request(target_addr).await?;
 
         Ok(socks_stream)
     }

@@ -8,9 +8,9 @@ description = "Fast SOCKS5 client/server implementation written in Rust async/.a
 repository = "https://github.com/dizda/fast-socks5"
 
 [dependencies]
-futures = "0.3.6"
+futures = "0.3.8"
 log = "0.4"
-async-std = { version = "1.6.5", features = ["default"] }
+async-std = { version = "1.8.0", features = ["default"] }
 anyhow = "1.0"
 thiserror = "1.0"
 

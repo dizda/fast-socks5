@@ -4,8 +4,9 @@ use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use async_std::{
     future,
-    net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs},
+    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs},
     sync::Arc,
+    task::ready,
     task::{Context as AsyncContext, Poll},
 };
 use futures::{
@@ -119,34 +120,46 @@ impl Socks5Server {
 
     /// Can loop on `incoming().next()` to iterate over incoming connections.
     pub fn incoming(&self) -> Incoming<'_> {
-        Incoming(self)
+        Incoming(self, None)
     }
 }
 
 /// `Incoming` implements [`futures::stream::Stream`].
-pub struct Incoming<'a>(&'a Socks5Server);
+pub struct Incoming<'a>(
+    &'a Socks5Server,
+    Option<Pin<Box<dyn Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send + Sync + 'a>>>,
+);
 
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
 impl<'a> Stream for Incoming<'a> {
     type Item = Result<Socks5Socket<TcpStream>>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut AsyncContext<'_>) -> Poll<Option<Self::Item>> {
-        let fut = self.0.listener.accept();
-        // have to pin the future, otherwise can't poll it
-        futures::pin_mut!(fut);
+    /// this code is mainly borrowed from [`Incoming::poll_next()` of `TcpListener`][tcpListener]
+    /// [tcpListener]: https://docs.rs/async-std/1.8.0/async_std/net/struct.TcpListener.html#method.incoming
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut AsyncContext<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if self.1.is_none() {
+                self.1 = Some(Box::pin(self.0.listener.accept()));
+            }
 
-        let (socket, peer_addr) = futures::ready!(fut.poll(cx))?;
-        let local_addr = socket.local_addr()?;
-        debug!(
-            "incoming connection from peer {} @ {}",
-            &peer_addr, &local_addr
-        );
+            if let Some(f) = &mut self.1 {
+                // early returns if pending
+                let (socket, peer_addr) = ready!(f.as_mut().poll(cx))?;
+                self.1 = None;
 
-        // Wrap the TcpStream into Socks5Socket
-        let socket = Socks5Socket::new(socket, self.0.config.clone());
+                let local_addr = socket.local_addr()?;
+                debug!(
+                    "incoming connection from peer {} @ {}",
+                    &peer_addr, &local_addr
+                );
 
-        Poll::Ready(Some(Ok(socket)))
+                // Wrap the TcpStream into Socks5Socket
+                let socket = Socks5Socket::new(socket, self.0.config.clone());
+
+                return Poll::Ready(Some(Ok(socket)));
+            }
+        }
     }
 }
 
@@ -620,7 +633,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::socks5::server::Socks5Server;
+    use crate::server::Socks5Server;
 
     #[test]
     fn test_bind() {

@@ -127,7 +127,7 @@ pub type Result<T, E = SocksError> = core::result::Result<T, E>;
 pub enum ReplyError {
     #[error("General failure")]
     GeneralFailure,
-    #[error("Connection not allowed")]
+    #[error("Connection not allowed by ruleset")]
     ConnectionNotAllowed,
     #[error("Network unreachable")]
     NetworkUnreachable,

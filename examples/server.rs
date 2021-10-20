@@ -10,7 +10,7 @@ use std::future::Future;
 use structopt::StructOpt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task;
-use tokio_stream::{StreamExt};
+use tokio_stream::StreamExt;
 
 /// # How to use it:
 ///

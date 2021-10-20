@@ -205,7 +205,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
                 self.reply(&e).await?;
-                return Err(e.into()) // propagate the error to end this connection's task
+                return Err(e.into()); // propagate the error to end this connection's task
             }
             // if any other errors has been detected, we simply end connection's task
             Err(d) => return Err(d),
@@ -499,10 +499,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                 Ok(o) => o,
                 Err(e) => match e.kind() {
                     // Match other TCP errors with ReplyError
-                    io::ErrorKind::ConnectionRefused => return Err(ReplyError::ConnectionRefused.into()),
-                    io::ErrorKind::ConnectionAborted => return Err(ReplyError::ConnectionNotAllowed.into()),
-                    io::ErrorKind::ConnectionReset => return Err(ReplyError::ConnectionNotAllowed.into()),
-                    io::ErrorKind::NotConnected => return Err(ReplyError::NetworkUnreachable.into()),
+                    io::ErrorKind::ConnectionRefused => {
+                        return Err(ReplyError::ConnectionRefused.into())
+                    }
+                    io::ErrorKind::ConnectionAborted => {
+                        return Err(ReplyError::ConnectionNotAllowed.into())
+                    }
+                    io::ErrorKind::ConnectionReset => {
+                        return Err(ReplyError::ConnectionNotAllowed.into())
+                    }
+                    io::ErrorKind::NotConnected => {
+                        return Err(ReplyError::NetworkUnreachable.into())
+                    }
                     _ => return Err(e.into()), // #[error("General failure")] ?
                 },
             },

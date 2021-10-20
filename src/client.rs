@@ -6,10 +6,9 @@ use anyhow::Context;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context as AsyncContext, Poll};
+use std::task::Poll;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs, ToSocketAddrs};
+use tokio::net::{TcpStream, ToSocketAddrs};
 
 const MAX_ADDR_LEN: usize = 260;
 

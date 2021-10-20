@@ -610,7 +610,7 @@ mod test {
     fn test_bind() {
         //dza
         async {
-            let server = Socks5Server::bind("127.0.0.1:1080").await.unwrap();
+            let _server = Socks5Server::bind("127.0.0.1:1080").await.unwrap();
         };
     }
 }

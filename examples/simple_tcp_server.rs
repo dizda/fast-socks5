@@ -3,7 +3,7 @@
 extern crate log;
 
 use fast_socks5::{
-    server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
+    server::{Config, SimpleUserPassword, Socks5Socket},
     Result,
 };
 use std::future::Future;
@@ -86,7 +86,7 @@ async fn spawn_socks_server() -> Result<()> {
 
     let config = Arc::new(config);
 
-    let mut listener = TcpListener::bind(&opt.listen_addr).await?;
+    let listener = TcpListener::bind(&opt.listen_addr).await?;
     //    listener.set_config(config);
 
     info!("Listen for socks connections @ {}", &opt.listen_addr);
@@ -94,7 +94,7 @@ async fn spawn_socks_server() -> Result<()> {
     // Standard TCP loop
     loop {
         match listener.accept().await {
-            Ok((socket, addr)) => {
+            Ok((socket, _addr)) => {
                 info!("Connection from {}", socket.peer_addr()?);
                 let socket = Socks5Socket::new(socket, config.clone());
 

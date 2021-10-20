@@ -3,10 +3,13 @@ use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
-use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use futures::{task::Poll, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context as AsyncContext, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs, ToSocketAddrs};
 
 const MAX_ADDR_LEN: usize = 260;
 
@@ -427,8 +430,8 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.socket).poll_read(context, buf)
     }
 }
@@ -453,10 +456,10 @@ where
         Pin::new(&mut self.socket).poll_flush(context)
     }
 
-    fn poll_close(
+    fn poll_shutdown(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_close(context)
+        Pin::new(&mut self.socket).poll_shutdown(context)
     }
 }

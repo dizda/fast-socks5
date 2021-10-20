@@ -28,3 +28,13 @@ macro_rules! read_exact {
         $stream.read_exact(&mut x).await.map(|_| x)
     }};
 }
+
+#[macro_export]
+macro_rules! ready {
+    ($e:expr $(,)?) => {
+        match $e {
+            std::task::Poll::Ready(t) => t,
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+    };
+}

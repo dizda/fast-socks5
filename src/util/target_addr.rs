@@ -1,12 +1,13 @@
 use crate::consts;
 use crate::read_exact;
 use anyhow::Context;
-use async_std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
-use futures::{AsyncRead, AsyncReadExt};
 use std::fmt;
 use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::vec::IntoIter;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::net::lookup_host;
 
 /// SOCKS5 reply code
 #[derive(Error, Debug)]
@@ -49,8 +50,8 @@ impl TargetAddr {
             TargetAddr::Ip(ip) => Ok(TargetAddr::Ip(ip)),
             TargetAddr::Domain(domain, port) => {
                 debug!("Attempt to DNS resolve the domain {}...", &domain);
-                let socket_addr = (&domain[..], port)
-                    .to_socket_addrs()
+
+                let socket_addr = lookup_host((&domain[..], port))
                     .await
                     .context(AddrError::DNSResolutionFailed)?
                     .next()

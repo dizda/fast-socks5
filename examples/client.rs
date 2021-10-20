@@ -3,11 +3,10 @@
 extern crate log;
 
 use anyhow::Context;
-use async_std::task;
 use fast_socks5::client::Config;
 use fast_socks5::{client::Socks5Stream, Result};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use structopt::StructOpt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// # How to use it:
 ///
@@ -46,10 +45,11 @@ struct Opt {
     pub skip_auth: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
 
-    task::block_on(spawn_socks_client())
+    spawn_socks_client().await
 }
 
 async fn spawn_socks_client() -> Result<()> {
@@ -112,7 +112,10 @@ async fn http_request<T: AsyncRead + AsyncWrite + Unpin>(
         .context("Can't read HTTP Response")?;
 
     info!("Response: {}", String::from_utf8_lossy(&result));
-    assert!(result.starts_with(b"HTTP/1.1"));
+
+    if result.starts_with(b"HTTP/1.1") {
+        info!("HTTP/1.1 Response detected!");
+    }
     //assert!(result.ends_with(b"</HTML>\r\n") || result.ends_with(b"</html>"));
 
     Ok(())

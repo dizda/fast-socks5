@@ -2,15 +2,18 @@
 #[macro_use]
 extern crate log;
 
-use async_std::net::TcpListener;
-use async_std::sync::Arc;
-use async_std::{future::Future, stream::StreamExt, task};
 use fast_socks5::{
     server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
     Result,
 };
-use futures::{AsyncRead, AsyncWrite};
+use std::future::Future;
+use std::sync::Arc;
 use structopt::StructOpt;
+use tokio::task;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpListener,
+};
 
 /// # How to use it:
 ///
@@ -61,10 +64,11 @@ enum AuthMode {
 /// TODO: Write functional tests: https://github.com/ark0f/async-socks5/blob/master/src/lib.rs#L762
 /// TODO: Write functional tests with cURL?
 /// TODO: Move this to as a standalone library
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
 
-    task::block_on(spawn_socks_server())
+    spawn_socks_server().await
 }
 
 async fn spawn_socks_server() -> Result<()> {
@@ -85,27 +89,18 @@ async fn spawn_socks_server() -> Result<()> {
     let mut listener = TcpListener::bind(&opt.listen_addr).await?;
     //    listener.set_config(config);
 
-    let mut incoming = listener.incoming();
-
     info!("Listen for socks connections @ {}", &opt.listen_addr);
 
     // Standard TCP loop
-    while let Some(socket_res) = incoming.next().await {
-        match socket_res {
-            Ok(socket) => {
+    loop {
+        match listener.accept().await {
+            Ok((socket, addr)) => {
                 info!("Connection from {}", socket.peer_addr()?);
                 let socket = Socks5Socket::new(socket, config.clone());
 
-                //                                socket.upgrade_to_socks5().await;
                 spawn_and_log_error(socket.upgrade_to_socks5());
-                //                match socket.upgrade_to_socks5().await {
-                //                    Ok(_) => {}
-                //                    Err(e) => error!("{:#}", &e),
-                //                }
             }
-            Err(err) => {
-                error!("accept error = {:?}", err);
-            }
+            Err(err) => error!("accept error = {:?}", err),
         }
     }
 

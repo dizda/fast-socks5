@@ -1,22 +1,19 @@
 use crate::read_exact;
+use crate::ready;
 use crate::util::target_addr::{read_address, TargetAddr};
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
-use async_std::{
-    future,
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs},
-    sync::Arc,
-    task::ready,
-    task::{Context as AsyncContext, Poll},
-};
-use futures::{
-    future::{Either, Future},
-    stream::Stream,
-    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
-};
+use std::future::Future;
 use std::io;
-use std::net::ToSocketAddrs as StdToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context as AsyncContext, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
+use tokio::time::timeout;
+use tokio_stream::{Stream, StreamExt};
 
 #[derive(Clone)]
 pub struct Config {
@@ -493,13 +490,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .next()
             .context("unreachable")?;
 
+        let fut = TcpStream::connect(addr);
+        let limit = Duration::from_secs(self.config.request_timeout);
+
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        let outbound = match future::timeout(
-            std::time::Duration::from_secs(self.config.request_timeout),
-            TcpStream::connect(addr),
-        )
-        .await
-        {
+        let outbound = match timeout(limit, fut).await {
             Ok(e) => match e {
                 Ok(o) => o,
                 Err(e) => match e.kind() {
@@ -552,38 +547,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
 /// Copy data between two peers
 /// Using 2 different generators, because they could be different structs with same traits.
-async fn transfer<I, O>(mut inbound: I, outbound: O) -> Result<()>
+async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Unpin,
     O: AsyncRead + AsyncWrite + Unpin,
 {
-    //TODO: use TcpStream.clone() https://github.com/async-rs/async-std/pull/689/files#diff-633608b66cafdfb86435918f3a48bea5R17
-
-    //    let (mut ri, mut wi) = (&inbound, &inbound);
-    let (mut ri, mut wi) = futures::io::AsyncReadExt::split(&mut inbound);
-    //    let (mut ro, mut wo) = (&outbound, &outbound);
-    let (mut ro, mut wo) = futures::io::AsyncReadExt::split(outbound);
-
-    // Exchange data
-    // For some reasons, futures::future::select does not work with async_std::io::copy() 🤔
-    let inbound_to_outbound = futures::io::copy(&mut ri, &mut wo);
-    let outbound_to_inbound = futures::io::copy(&mut ro, &mut wi);
-
-    // I've chosen `select` over `join` because the inbound (client) is more likely to leave the connection open for a while,
-    // while it's not necessarily as the other part (outbound, aka remote server) has closed the communication.
-    match futures::future::select(inbound_to_outbound, outbound_to_inbound).await {
-        Either::Left((Ok(data), _)) => {
-            info!("local closed -> remote target ({} bytes consumed)", data)
-        }
-        Either::Left((Err(err), _)) => {
-            error!("local closed -> remote target with error {:?}", err,)
-        }
-        Either::Right((Ok(data), _)) => {
-            info!("local <- remote target closed ({} bytes consumed)", data)
-        }
-        Either::Right((Err(err), _)) => {
-            error!("local <- remote target closed with error {:?}", err,)
-        }
+    match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+        Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
+        Err(err) => error!("transfer error: {:?}", err),
     };
 
     Ok(())
@@ -597,8 +568,8 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(context, buf)
     }
 }
@@ -623,11 +594,11 @@ where
         Pin::new(&mut self.inner).poll_flush(context)
     }
 
-    fn poll_close(
+    fn poll_shutdown(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_close(context)
+        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 

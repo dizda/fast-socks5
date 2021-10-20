@@ -67,7 +67,7 @@ where
         }
 
         // Handshake Lifecycle
-        if stream.config.skip_auth == false {
+        if !stream.config.skip_auth {
             let methods = stream.send_version_and_methods(methods).await?;
             stream.which_method_accepted(methods).await?;
         } else {
@@ -173,7 +173,7 @@ where
                     .await
                     .context("Can't write that the methods are unsupported.")?;
 
-                return Err(SocksError::AuthMethodUnacceptable(vec![method]))?;
+                return Err(SocksError::AuthMethodUnacceptable(vec![method]));
             }
         }
 
@@ -289,7 +289,7 @@ where
             TargetAddr::Domain(ref domain, port) => {
                 debug!("TargetAddr::Domain");
                 if domain.len() > u8::max_value() as usize {
-                    return Err(SocksError::ExceededMaxDomainLen(domain.len()))?;
+                    return Err(SocksError::ExceededMaxDomainLen(domain.len()));
                 }
                 padding = 5 + domain.len() + 2;
 
@@ -339,7 +339,7 @@ where
         }
 
         if reply != consts::SOCKS5_REPLY_SUCCEEDED {
-            return Err(ReplyError::from_u8(reply))?; // Convert reply received into correct error
+            return Err(ReplyError::from_u8(reply).into()); // Convert reply received into correct error
         }
 
         let address = read_address(&mut self.socket, address_type).await?;

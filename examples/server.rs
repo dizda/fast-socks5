@@ -82,7 +82,7 @@ async fn spawn_socks_server() -> Result<()> {
             if opt.skip_auth {
                 return Err(SocksError::ArgumentInputError(
                     "Can't use skip-auth flag and authentication altogether.",
-                ))?;
+                ));
             }
 
             config.set_authentication(SimpleUserPassword { username, password });

@@ -184,7 +184,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         trace!("upgrading to socks5...");
 
         // Handshake
-        if self.config.skip_auth == false {
+        if !self.config.skip_auth {
             let methods = self.get_methods().await?;
 
             self.can_accept_method(methods).await?;
@@ -205,7 +205,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
                 self.reply(&e).await?;
-                Err(e)? // propagate the error to end this connection's task
+                return Err(e.into()) // propagate the error to end this connection's task
             }
             // if any other errors has been detected, we simply end connection's task
             Err(d) => return Err(d),
@@ -442,7 +442,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         }
 
         if cmd != consts::SOCKS5_CMD_TCP_CONNECT {
-            return Err(ReplyError::CommandNotSupported)?;
+            return Err(ReplyError::CommandNotSupported.into());
         }
 
         // Guess address type
@@ -499,15 +499,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
                 Ok(o) => o,
                 Err(e) => match e.kind() {
                     // Match other TCP errors with ReplyError
-                    io::ErrorKind::ConnectionRefused => Err(ReplyError::ConnectionRefused)?,
-                    io::ErrorKind::ConnectionAborted => Err(ReplyError::ConnectionNotAllowed)?,
-                    io::ErrorKind::ConnectionReset => Err(ReplyError::ConnectionNotAllowed)?,
-                    io::ErrorKind::NotConnected => Err(ReplyError::NetworkUnreachable)?,
-                    _ => Err(e)?, // #[error("General failure")] ?
+                    io::ErrorKind::ConnectionRefused => return Err(ReplyError::ConnectionRefused.into()),
+                    io::ErrorKind::ConnectionAborted => return Err(ReplyError::ConnectionNotAllowed.into()),
+                    io::ErrorKind::ConnectionReset => return Err(ReplyError::ConnectionNotAllowed.into()),
+                    io::ErrorKind::NotConnected => return Err(ReplyError::NetworkUnreachable.into()),
+                    _ => return Err(e.into()), // #[error("General failure")] ?
                 },
             },
             // Wrap timeout error in a proper ReplyError
-            Err(_) => Err(ReplyError::TtlExpired)?,
+            Err(_) => return Err(ReplyError::TtlExpired.into()),
         };
 
         debug!("Connected to remote destination");

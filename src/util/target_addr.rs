@@ -182,7 +182,7 @@ pub async fn read_address<T: AsyncRead + Unpin>(
 
             Addr::Domain(domain)
         }
-        _ => return Err(anyhow::anyhow!(AddrError::IncorrectAddressType))?,
+        _ => return Err(anyhow::anyhow!(AddrError::IncorrectAddressType)),
     };
 
     // Find port number

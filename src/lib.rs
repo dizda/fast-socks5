@@ -91,8 +91,6 @@ impl fmt::Display for AuthenticationMethod {
 pub enum SocksError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
-    #[error("request timeout: {0}")]
-    FutureTimeout(#[from] async_std::future::TimeoutError),
     #[error("the data for key `{0}` is not available")]
     Redaction(String),
     #[error("invalid header (expected {expected:?}, found {found:?})")]

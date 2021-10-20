@@ -10,7 +10,7 @@
 
 - An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.
 - No **unsafe** code
-- Built on-top of `async-std` library
+- Built on-top of `tokio` library
 - Ultra lightweight and scalable
 - No system dependencies
 - Cross-platform
@@ -22,11 +22,11 @@
 - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
 - `IPv4`, `IPv6`, and `Domains` types are supported
 - Config helper for Socks5Server
-- Helpers to run a Socks5Server à la *"async-std's TcpStream"* via `incoming.next().await`
+- Helpers to run a Socks5Server à la *"std's TcpStream"* via `incoming.next().await`
 - Examples come with real cases commands scenarios
 - Can disable `DNS resolving`
-- Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in an already authenticated environment)
-- Can disable command execution (useful if you just want to forward the request to an another server)
+- Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in a current authenticated environment)
+- Can disable command execution (useful if you just want to forward the request to a different server)
 
 
 ## Install

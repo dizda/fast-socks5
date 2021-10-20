@@ -2,13 +2,15 @@
 #[macro_use]
 extern crate log;
 
-use async_std::{future::Future, stream::StreamExt, task};
 use fast_socks5::{
     server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
     Result, SocksError,
 };
-use futures::{AsyncRead, AsyncWrite};
+use std::future::Future;
 use structopt::StructOpt;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::task;
+use tokio_stream::StreamExt;
 
 /// # How to use it:
 ///
@@ -61,10 +63,11 @@ enum AuthMode {
 ///
 /// TODO: Write functional tests: https://github.com/ark0f/async-socks5/blob/master/src/lib.rs#L762
 /// TODO: Write functional tests with cURL?
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
 
-    task::block_on(spawn_socks_server())
+    spawn_socks_server().await
 }
 
 async fn spawn_socks_server() -> Result<()> {
@@ -79,7 +82,7 @@ async fn spawn_socks_server() -> Result<()> {
             if opt.skip_auth {
                 return Err(SocksError::ArgumentInputError(
                     "Can't use skip-auth flag and authentication altogether.",
-                ))?;
+                ));
             }
 
             config.set_authentication(SimpleUserPassword { username, password });

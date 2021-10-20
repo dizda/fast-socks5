@@ -3,10 +3,12 @@ use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
-use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use futures::{task::Poll, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::task::Poll;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpStream, ToSocketAddrs};
 
 const MAX_ADDR_LEN: usize = 260;
 
@@ -65,7 +67,7 @@ where
         }
 
         // Handshake Lifecycle
-        if stream.config.skip_auth == false {
+        if !stream.config.skip_auth {
             let methods = stream.send_version_and_methods(methods).await?;
             stream.which_method_accepted(methods).await?;
         } else {
@@ -171,7 +173,7 @@ where
                     .await
                     .context("Can't write that the methods are unsupported.")?;
 
-                return Err(SocksError::AuthMethodUnacceptable(vec![method]))?;
+                return Err(SocksError::AuthMethodUnacceptable(vec![method]));
             }
         }
 
@@ -287,7 +289,7 @@ where
             TargetAddr::Domain(ref domain, port) => {
                 debug!("TargetAddr::Domain");
                 if domain.len() > u8::max_value() as usize {
-                    return Err(SocksError::ExceededMaxDomainLen(domain.len()))?;
+                    return Err(SocksError::ExceededMaxDomainLen(domain.len()));
                 }
                 padding = 5 + domain.len() + 2;
 
@@ -337,7 +339,7 @@ where
         }
 
         if reply != consts::SOCKS5_REPLY_SUCCEEDED {
-            return Err(ReplyError::from_u8(reply))?; // Convert reply received into correct error
+            return Err(ReplyError::from_u8(reply).into()); // Convert reply received into correct error
         }
 
         let address = read_address(&mut self.socket, address_type).await?;
@@ -427,8 +429,8 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.socket).poll_read(context, buf)
     }
 }
@@ -453,10 +455,10 @@ where
         Pin::new(&mut self.socket).poll_flush(context)
     }
 
-    fn poll_close(
+    fn poll_shutdown(
         mut self: Pin<&mut Self>,
         context: &mut std::task::Context,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_close(context)
+        Pin::new(&mut self.socket).poll_shutdown(context)
     }
 }

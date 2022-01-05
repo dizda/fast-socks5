@@ -8,6 +8,7 @@ pub mod util;
 
 use std::fmt;
 use std::io;
+use std::net::AddrParseError;
 use thiserror::Error;
 
 #[rustfmt::skip]
@@ -112,6 +113,8 @@ pub enum SocksError {
 
     #[error("Argument input error: `{0}`.")]
     ArgumentInputError(&'static str),
+    #[error("Address parse error: `{0}`.")]
+    AddrParseError(#[from] AddrParseError),
 
     //    #[error("Other: `{0}`.")]
     #[error(transparent)]

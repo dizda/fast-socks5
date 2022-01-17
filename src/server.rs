@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::time::timeout;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 
 #[derive(Clone)]
 pub struct Config {
@@ -26,6 +26,8 @@ pub struct Config {
     /// Enable command execution
     execute_command: bool,
     auth: Option<Arc<dyn Authentication>>,
+    /// Outgoing bind
+    outgoing_addr: Option<SocketAddr>,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             dns_resolve: true,
             execute_command: true,
             auth: None,
+            outgoing_addr: None,
         }
     }
 }
@@ -91,6 +94,12 @@ impl Config {
     /// Will the server perform dns resolve
     pub fn set_dns_resolve(&mut self, value: bool) -> &mut Self {
         self.dns_resolve = value;
+        self
+    }
+
+    /// Outgoing address
+    pub fn set_outgoing_addr(&mut self, outgoing_addr: Option<SocketAddr>) -> &mut Self {
+        self.outgoing_addr = outgoing_addr;
         self
     }
 }
@@ -490,7 +499,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .next()
             .context("unreachable")?;
 
-        let fut = TcpStream::connect(addr);
+        let fut = bind_and_connect(self.config.outgoing_addr, addr);
         let limit = Duration::from_secs(self.config.request_timeout);
 
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
@@ -566,6 +575,24 @@ where
     };
 
     Ok(())
+}
+
+async fn bind_and_connect(
+    bind_addr_opt: Option<SocketAddr>,
+    connect_addr: SocketAddr,
+) -> io::Result<TcpStream> {
+    match bind_addr_opt {
+        Some(bind_addr) => {
+            use SocketAddr::*;
+            let sock = match bind_addr {
+                V4(_) => TcpSocket::new_v4(),
+                V6(_) => TcpSocket::new_v6(),
+            }?;
+            sock.bind(bind_addr)?;
+            sock.connect(connect_addr).await
+        }
+        None => TcpStream::connect(connect_addr).await,
+    }
 }
 
 /// Allow us to read directly from the struct

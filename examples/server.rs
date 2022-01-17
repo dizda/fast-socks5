@@ -7,6 +7,8 @@ use fast_socks5::{
     Result, SocksError,
 };
 use std::future::Future;
+use std::net::SocketAddr;
+use std::str::FromStr;
 use structopt::StructOpt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task;
@@ -41,6 +43,10 @@ struct Opt {
     /// Don't perform the auth handshake, send directly the command request
     #[structopt(short = "k", long)]
     pub skip_auth: bool,
+
+    /// Outgoing address
+    #[structopt(short, long)]
+    pub outgoing_addr: Option<String>,
 }
 
 /// Choose the authentication type
@@ -75,6 +81,10 @@ async fn spawn_socks_server() -> Result<()> {
     let mut config = Config::default();
     config.set_request_timeout(opt.request_timeout);
     config.set_skip_auth(opt.skip_auth);
+
+    if let Some(outgoing_addr) = opt.outgoing_addr {
+        config.set_outgoing_addr(Some(SocketAddr::from_str(&outgoing_addr)?));
+    }
 
     match opt.auth {
         AuthMode::NoAuth => warn!("No authentication has been set!"),

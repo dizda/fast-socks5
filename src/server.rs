@@ -6,6 +6,8 @@ use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -168,6 +170,8 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
     auth: AuthenticationMethod,
     target_addr: Option<TargetAddr>,
     cmd: Option<Socks5Command>,
+    /// Socket address which will be used in the reply message.
+    reply_ip: Option<IpAddr>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
@@ -178,7 +182,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             auth: AuthenticationMethod::None,
             target_addr: None,
             cmd: None,
+            reply_ip: None,
         }
+    }
+
+    /// Set the bind IP address in Socks5Reply.
+    /// 
+    /// Only the inner socket owner knows the correct reply bind addr, so leave this field to be 
+    /// populated. For those strict clients, users can use this function to set the correct IP 
+    /// address.
+    /// 
+    /// Most popular SOCKS5 clients [1] [2] ignore BND.ADDR and BND.PORT the reply of command 
+    /// CONNECT, but this field could be useful in some other command, such as UDP ASSOCIATE.
+    /// 
+    /// [1]. https://github.com/chromium/chromium/blob/bd2c7a8b65ec42d806277dd30f138a673dec233a/net/socket/socks5_client_socket.cc#L481
+    /// [2]. https://github.com/curl/curl/blob/d15692ebbad5e9cfb871b0f7f51a73e43762cee2/lib/socks.c#L978
+    pub fn set_reply_ip(&mut self, addr: IpAddr) {
+        self.reply_ip = Some(addr);
     }
 
     /// Process clients SOCKS requests
@@ -207,7 +227,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Ok(_) => {}
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
-                self.reply(&e).await?;
+                self.reply_error(&e).await?;
                 return Err(e.into()); // propagate the error to end this connection's task
             }
             // if any other errors has been detected, we simply end connection's task
@@ -390,24 +410,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(())
     }
 
-    /// Reply to the client with the correct reply code according to the RFC.
-    async fn reply(&mut self, error: &ReplyError) -> Result<()> {
-        let reply = &[
-            consts::SOCKS5_VERSION,
-            error.as_u8(), // transform the error into byte code
-            0x00,          // reserved
-            1,             // address type (ipv4, v6, domain)
-            127,           // ip
-            0,
-            0,
-            1,
-            0, // port
-            0,
-        ];
+    /// Reply error to the client with the reply code according to the RFC.
+    async fn reply_error(&mut self, error: &ReplyError) -> Result<()> {
+        let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
         debug!("reply error to be written: {:?}", &reply);
 
         self.inner
-            .write(reply)
+            .write(&reply)
             .await
             .context("Can't write the reply!")?;
 
@@ -531,20 +540,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Connected to remote destination");
 
-        // TODO: convert this to the real address
         self.inner
-            .write(&[
-                consts::SOCKS5_VERSION,
-                consts::SOCKS5_REPLY_SUCCEEDED,
-                0x00, // reserved
-                1,    // address type (ipv4, v6, domain)
-                127,  // ip
-                0,
-                0,
-                1,
-                0, // port
-                0,
-            ])
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            ))
             .await
             .context("Can't write successful reply")?;
 
@@ -619,6 +619,33 @@ where
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(context)
     }
+}
+
+/// Generate reply code according to the RFC.
+fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
+    let (addr_type, mut ip_oct, mut port) = match sock_addr {
+        SocketAddr::V4(sock) => (
+            consts::SOCKS5_ADDR_TYPE_IPV4,
+            sock.ip().octets().to_vec(),
+            sock.port().to_ne_bytes().to_vec(),
+        ),
+        SocketAddr::V6(sock) => (
+            consts::SOCKS5_ADDR_TYPE_IPV6,
+            sock.ip().octets().to_vec(),
+            sock.port().to_ne_bytes().to_vec(),
+        ),
+    };
+
+    let mut reply = vec![
+        consts::SOCKS5_VERSION,
+        error.as_u8(), // transform the error into byte code
+        0x00,          // reserved
+        addr_type,     // address type (ipv4, v6, domain)
+    ];
+    reply.append(&mut ip_oct);
+    reply.append(&mut port);
+
+    return reply;
 }
 
 #[cfg(test)]

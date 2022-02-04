@@ -154,6 +154,8 @@ pub type Result<T, E = SocksError> = core::result::Result<T, E>;
 /// SOCKS5 reply code
 #[derive(Error, Debug, Copy, Clone)]
 pub enum ReplyError {
+    #[error("Succeeded")]
+    Succeeded,
     #[error("General failure")]
     GeneralFailure,
     #[error("Connection not allowed by ruleset")]
@@ -178,6 +180,7 @@ impl ReplyError {
     #[rustfmt::skip]
     pub fn as_u8(self) -> u8 {
         match self {
+            ReplyError::Succeeded               => consts::SOCKS5_REPLY_SUCCEEDED,
             ReplyError::GeneralFailure          => consts::SOCKS5_REPLY_GENERAL_FAILURE,
             ReplyError::ConnectionNotAllowed    => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
             ReplyError::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
@@ -194,6 +197,7 @@ impl ReplyError {
     #[rustfmt::skip]
     pub fn from_u8(code: u8) -> ReplyError {
         match code {
+            consts::SOCKS5_REPLY_SUCCEEDED                  => ReplyError::Succeeded,
             consts::SOCKS5_REPLY_GENERAL_FAILURE            => ReplyError::GeneralFailure,
             consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED     => ReplyError::ConnectionNotAllowed,
             consts::SOCKS5_REPLY_NETWORK_UNREACHABLE        => ReplyError::NetworkUnreachable,

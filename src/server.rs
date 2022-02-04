@@ -1,6 +1,7 @@
 use crate::read_exact;
 use crate::ready;
 use crate::util::target_addr::{read_address, TargetAddr};
+use crate::Socks5Command;
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use std::future::Future;
@@ -166,6 +167,7 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
     config: Arc<Config>,
     auth: AuthenticationMethod,
     target_addr: Option<TargetAddr>,
+    cmd: Option<Socks5Command>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
@@ -175,6 +177,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             config,
             auth: AuthenticationMethod::None,
             target_addr: None,
+            cmd: None,
         }
     }
 
@@ -441,8 +444,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             return Err(SocksError::UnsupportedSocksVersion(version));
         }
 
-        if cmd != consts::SOCKS5_CMD_TCP_CONNECT {
-            return Err(ReplyError::CommandNotSupported.into());
+        match Socks5Command::from_u8(cmd) {
+            None => return Err(ReplyError::CommandNotSupported.into()),
+            Some(cmd) => match cmd {
+                Socks5Command::TCPConnect => {
+                    self.cmd = Some(cmd);
+                }
+                Socks5Command::TCPBind | Socks5Command::UDPAssociate => {
+                    return Err(ReplyError::CommandNotSupported.into())
+                }
+            },
         }
 
         // Guess address type

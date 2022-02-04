@@ -39,6 +39,37 @@ pub mod consts {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum Socks5Command {
+    TCPConnect,
+    TCPBind,
+    UDPAssociate,
+}
+
+#[allow(dead_code)]
+impl Socks5Command {
+    #[inline]
+    #[rustfmt::skip]
+    fn as_u8(&self) -> u8 {
+        match self {
+            Socks5Command::TCPConnect   => consts::SOCKS5_CMD_TCP_CONNECT,
+            Socks5Command::TCPBind      => consts::SOCKS5_CMD_TCP_BIND,
+            Socks5Command::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
+        }
+    }
+
+    #[inline]
+    #[rustfmt::skip]
+    fn from_u8(code: u8) -> Option<Socks5Command> {
+        match code {
+            consts::SOCKS5_CMD_TCP_CONNECT      => Some(Socks5Command::TCPConnect),
+            consts::SOCKS5_CMD_TCP_BIND         => Some(Socks5Command::TCPBind),
+            consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Socks5Command::UDPAssociate),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum AuthenticationMethod {
     None,
     Password { username: String, password: String },

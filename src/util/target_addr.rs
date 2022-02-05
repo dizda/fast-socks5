@@ -1,5 +1,7 @@
 use crate::consts;
+use crate::consts::SOCKS5_ADDR_TYPE_IPV4;
 use crate::read_exact;
+use crate::SocksError;
 use anyhow::Context;
 use std::fmt;
 use std::io;
@@ -71,6 +73,40 @@ impl TargetAddr {
             TargetAddr::Ip(_) => true,
             _ => false,
         }
+    }
+
+    pub fn to_be_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let mut buf = vec![];
+        match self {
+            TargetAddr::Ip(SocketAddr::V4(addr)) => {
+                debug!("TargetAddr::IpV4");
+
+                buf.extend_from_slice(&[SOCKS5_ADDR_TYPE_IPV4]);
+
+                debug!("addr ip {:?}", (*addr.ip()).octets());
+                buf.extend_from_slice(&(addr.ip()).octets()); // ip
+                buf.extend_from_slice(&addr.port().to_be_bytes()); // port
+            }
+            TargetAddr::Ip(SocketAddr::V6(addr)) => {
+                debug!("TargetAddr::IpV6");
+                buf.extend_from_slice(&[consts::SOCKS5_ADDR_TYPE_IPV6]);
+
+                debug!("addr ip {:?}", (*addr.ip()).octets());
+                buf.extend_from_slice(&(addr.ip()).octets()); // ip
+                buf.extend_from_slice(&addr.port().to_be_bytes()); // port
+            }
+            TargetAddr::Domain(ref domain, port) => {
+                debug!("TargetAddr::Domain");
+                if domain.len() > u8::max_value() as usize {
+                    return Err(SocksError::ExceededMaxDomainLen(domain.len()).into());
+                }
+                buf.extend_from_slice(&[consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME, domain.len() as u8]);
+                buf.extend_from_slice(domain.as_bytes()); // domain content
+                buf.extend_from_slice(&port.to_be_bytes());
+                // port content (.to_be_bytes() convert from u16 to u8 type)
+            }
+        }
+        Ok(buf)
     }
 }
 

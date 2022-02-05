@@ -1,3 +1,5 @@
+use crate::new_udp_header;
+use crate::parse_udp_request;
 use crate::read_exact;
 use crate::ready;
 use crate::util::target_addr::{read_address, TargetAddr};
@@ -14,8 +16,10 @@ use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::time::timeout;
+use tokio::try_join;
 use tokio_stream::Stream;
 
 #[derive(Clone)]
@@ -456,12 +460,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         match Socks5Command::from_u8(cmd) {
             None => return Err(ReplyError::CommandNotSupported.into()),
             Some(cmd) => match cmd {
-                Socks5Command::TCPConnect => {
+                Socks5Command::TCPConnect | Socks5Command::UDPAssociate => {
                     self.cmd = Some(cmd);
                 }
-                Socks5Command::TCPBind | Socks5Command::UDPAssociate => {
-                    return Err(ReplyError::CommandNotSupported.into())
-                }
+                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
             },
         }
 
@@ -497,9 +499,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(())
     }
 
+    /// Execute the socks5 command that the client wants.
+    async fn execute_command(&mut self) -> Result<()> {
+        match &self.cmd {
+            None => return Err(ReplyError::CommandNotSupported.into()),
+            Some(cmd) => match cmd {
+                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
+                Socks5Command::TCPConnect => return self.execute_command_connect().await,
+                Socks5Command::UDPAssociate => return self.execute_command_udp_assoc().await,
+            },
+        }
+    }
+
     /// Connect to the target address that the client wants,
     /// then forward the data between them (client <=> target address).
-    async fn execute_command(&mut self) -> Result<()> {
+    async fn execute_command_connect(&mut self) -> Result<()> {
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
         let addr = self
@@ -555,6 +569,41 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         transfer(&mut self.inner, outbound).await
     }
 
+    /// Bind to a random UDP port, wait for the traffic from
+    /// the client, and then forward the data to the remote addr.
+    async fn execute_command_udp_assoc(&mut self) -> Result<()> {
+        // The DST.ADDR and DST.PORT fields contain the address and port that
+        // the client expects to use to send UDP datagrams on for the
+        // association. The server MAY use this information to limit access
+        // to the association.
+        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+        //
+        // We do NOT limit the access from the client currently in this implementation.
+        let _not_used = self.target_addr.as_ref();
+
+        // Listen with UDP6 socket, so the client can connect to it with either
+        // IPv4 or IPv6.
+        let peer_sock = UdpSocket::bind("[::]:0").await?;
+
+        // Respect the pre-populated reply IP address.
+        self.inner
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(
+                    self.reply_ip.context("invalid reply ip")?,
+                    peer_sock.local_addr()?.port(),
+                ),
+            ))
+            .await
+            .context("Can't write successful reply")?;
+
+        debug!("Wrote success");
+
+        transfer_udp(peer_sock).await?;
+
+        Ok(())
+    }
+
     pub fn target_addr(&self) -> Option<&TargetAddr> {
         self.target_addr.as_ref()
     }
@@ -575,6 +624,60 @@ where
         Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
         Err(err) => error!("transfer error: {:?}", err),
     };
+
+    Ok(())
+}
+
+async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+    let mut buf = vec![0u8; 0x10000];
+    loop {
+
+        let (size, client_addr) = inbound.recv_from(&mut buf).await?;
+        debug!("Server recieve udp from {}", client_addr);
+        inbound.connect(client_addr).await?;
+
+        let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
+
+        if frag != 0 {
+            debug!("Discard UDP frag packets sliently.");
+            return Ok(());
+        }
+
+        debug!("Server forward to packet to {}", target_addr);
+        let mut target_addr = target_addr
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+
+        target_addr.set_ip(match target_addr.ip() {
+            std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
+            v6 @ std::net::IpAddr::V6(_) => v6,
+        });
+        outbound.send_to(data, target_addr).await?;
+    }
+}
+
+async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+    let mut buf = vec![0u8; 0x10000];
+    loop {
+        let (size, remote_addr) = outbound.recv_from(&mut buf).await?;
+        debug!("Recieve packet from {}", remote_addr);
+
+        let mut data = new_udp_header(remote_addr)?;
+        data.extend_from_slice(&buf[..size]);
+        inbound.send(&data).await?;
+    }
+}
+
+async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
+    let outbound = UdpSocket::bind("[::]:0").await?;
+
+    let req_fut = handle_udp_request(&inbound, &outbound);
+    let res_fut = handle_udp_response(&inbound, &outbound);
+    match try_join!(req_fut, res_fut) {
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
 
     Ok(())
 }
@@ -627,12 +730,12 @@ fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
         SocketAddr::V4(sock) => (
             consts::SOCKS5_ADDR_TYPE_IPV4,
             sock.ip().octets().to_vec(),
-            sock.port().to_ne_bytes().to_vec(),
+            sock.port().to_be_bytes().to_vec(),
         ),
         SocketAddr::V6(sock) => (
             consts::SOCKS5_ADDR_TYPE_IPV6,
             sock.ip().octets().to_vec(),
-            sock.port().to_ne_bytes().to_vec(),
+            sock.port().to_be_bytes().to_vec(),
         ),
     };
 

@@ -103,8 +103,6 @@ async fn spawn_socks_server() -> Result<()> {
             Err(err) => error!("accept error = {:?}", err),
         }
     }
-
-    Ok(())
 }
 
 fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>

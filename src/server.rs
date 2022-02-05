@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::time::timeout;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 
 #[derive(Clone)]
 pub struct Config {
@@ -613,12 +613,14 @@ where
 #[cfg(test)]
 mod test {
     use crate::server::Socks5Server;
+    use tokio_test::block_on;
 
     #[test]
     fn test_bind() {
-        //dza
-        async {
+        let f = async {
             let _server = Socks5Server::bind("127.0.0.1:1080").await.unwrap();
         };
+
+        block_on(f);
     }
 }

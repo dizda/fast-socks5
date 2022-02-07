@@ -2,7 +2,7 @@
 ///
 /// # Examples (before)
 ///
-/// ```
+/// ```ignore
 /// let mut buf = [0u8; 2];
 /// stream.read_exact(&mut buf).await?;
 /// let [version, method_len] = buf;
@@ -12,7 +12,7 @@
 ///
 /// # Examples (after)
 ///
-/// ```
+/// ```ignore
 /// let [version, method_len] = read_exact!(stream, [0u8; 2]);
 ///
 /// assert_eq!(version, 0x05);

@@ -251,10 +251,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// or deny the handshake (thus the connection).
     ///
     /// # Examples
-    ///
+    /// ```text
     ///                    {SOCKS Version, methods-length}
     ///     eg. (non-auth) {5, 2}
     ///     eg. (auth)     {5, 3}
+    /// ```
     ///
     async fn get_methods(&mut self) -> Result<Vec<u8>> {
         trace!("Socks5Socket: get_methods()");
@@ -288,16 +289,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// # Request
     ///
     ///  Client send an array of 3 entries: [0, 1, 2]
-    ///
+    /// ```text
     ///                          {SOCKS Version,  Authentication chosen}
     ///     eg. (non-auth)       {5, 0}
     ///     eg. (GSSAPI)         {5, 1}
     ///     eg. (auth)           {5, 2}
+    /// ```
     ///
     /// # Response
-    ///     
+    /// ```text
     ///     eg. (accept non-auth) {5, 0x00}
     ///     eg. (non-acceptable)  {5, 0xff}
+    /// ```
     ///
     async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<()> {
         let method_supported;
@@ -433,12 +436,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
     /// # Request
-    ///
+    /// ```text
     ///          +----+-----+-------+------+----------+----------+
     ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
     ///          +----+-----+-------+------+----------+----------+
     ///          | 1  |  1  |   1   |  1   | Variable |    2     |
     ///          +----+-----+-------+------+----------+----------+
+    /// ```
     ///
     /// It the request is correct, it should returns a ['SocketAddr'].
     ///

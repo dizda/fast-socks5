@@ -220,7 +220,8 @@ impl ReplyError {
 
 /// Generate UDP header
 ///
-/// # UDP Request header
+/// # UDP Request header structure.
+/// ```text
 /// +----+------+------+----------+----------+----------+
 /// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
 /// +----+------+------+----------+----------+----------+
@@ -238,6 +239,7 @@ impl ReplyError {
 ///     o  DST.ADDR       desired destination address
 ///     o  DST.PORT       desired destination port
 ///     o  DATA     user data
+/// ```
 pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>> {
     let mut header = vec![
         0, 0, // RSV
@@ -266,4 +268,123 @@ pub async fn parse_udp_request<'a>(mut req: &'a [u8]) -> Result<(u8, TargetAddr,
     })?;
 
     Ok((frag, target_addr, req))
+}
+
+#[cfg(test)]
+mod test {
+    use anyhow::Result;
+    use tokio::{
+        net::{TcpListener, TcpStream, UdpSocket},
+        sync::oneshot::Sender,
+    };
+
+    use crate::{
+        client,
+        server::{self, SimpleUserPassword},
+    };
+    use std::{
+        net::{SocketAddr, ToSocketAddrs},
+        sync::Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+    use tokio_test::block_on;
+
+    async fn setup_socks_server(
+        proxy_addr: &str,
+        auth: Option<SimpleUserPassword>,
+        tx: Sender<SocketAddr>,
+    ) -> Result<()> {
+        let mut config = server::Config::default();
+        match auth {
+            None => {}
+            Some(up) => {
+                config.set_authentication(up);
+            }
+        }
+
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(proxy_addr).await?;
+        tx.send(listener.local_addr()?).unwrap();
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let mut socks5_socket = server::Socks5Socket::new(stream, config.clone());
+            socks5_socket.set_reply_ip(proxy_addr.parse::<SocketAddr>().unwrap().ip());
+
+            socks5_socket.upgrade_to_socks5().await?;
+        }
+    }
+
+    async fn google(mut socket: TcpStream) -> Result<()> {
+        socket.write_all(b"GET / HTTP/1.0\r\n\r\n").await?;
+        let mut result = vec![];
+        socket.read_to_end(&mut result).await?;
+
+        println!("{}", String::from_utf8_lossy(&result));
+        assert!(result.starts_with(b"HTTP/1.0"));
+        assert!(result.ends_with(b"</HTML>\r\n") || result.ends_with(b"</html>"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn google_no_auth() {
+        block_on(async {
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+
+            let socket = client::Socks5Stream::connect(
+                rx.await.unwrap(),
+                "google.com".to_owned(),
+                80,
+                client::Config::default(),
+            )
+            .await
+            .unwrap();
+            google(socket.get_socket()).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn udp_assosiate_no_auth() {
+        env_logger::init();
+        block_on(async {
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
+
+            let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
+                .await
+                .unwrap();
+
+            associate(tunnel, "[::1]:40235")
+                .await
+                .expect("error on associate");
+        });
+    }
+
+    async fn associate(socks: client::Socks5Datagram<TcpStream>, mock_server: &str) -> Result<()> {
+        let socket = UdpSocket::bind(mock_server).await?;
+
+        socks
+            .send_to(
+                b"hello world!",
+                mock_server.to_socket_addrs()?.next().unwrap(),
+            )
+            .await?;
+        println!("Send packet to {}", mock_server);
+
+        let mut buf = [0; 13];
+        let (len, addr) = socket.recv_from(&mut buf).await?;
+        assert_eq!(len, 12);
+        assert_eq!(&buf[..12], b"hello world!");
+
+        socket.send_to(b"hello world!", addr).await?;
+
+        let len = socks.recv_from(&mut buf).await?.0;
+        assert_eq!(len, 12);
+        assert_eq!(&buf[..12], b"hello world!");
+
+        Ok(())
+    }
 }

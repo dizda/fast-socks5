@@ -106,10 +106,11 @@ where
     /// or deny the handshake (thus the connection).
     ///
     /// # Examples
-    ///
+    /// ```text
     ///                    {SOCKS Version, methods-length}
     ///     eg. (non-auth) {5, 2}
     ///     eg. (auth)     {5, 3}
+    /// ```
     ///
     async fn send_version_and_methods(
         &mut self,
@@ -144,16 +145,18 @@ where
     /// # Request
     ///
     ///  Client send an array of 3 entries: [0, 1, 2]
-    ///
+    /// ```text
     ///                          {SOCKS Version,  Authentication chosen}
     ///     eg. (non-auth)       {5, 0}
     ///     eg. (GSSAPI)         {5, 1}
     ///     eg. (auth)           {5, 2}
+    /// ```
     ///
     /// # Response
-    ///
+    /// ```text
     ///     eg. (accept non-auth) {5, 0x00}
     ///     eg. (non-acceptable)  {5, 0xff}
+    /// ```
     ///
     async fn which_method_accepted(&mut self, methods: Vec<AuthenticationMethod>) -> Result<()> {
         let [version, method] =
@@ -244,19 +247,19 @@ where
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
     /// # Request
-    ///
+    /// ```test
     ///          +----+-----+-------+------+----------+----------+
     ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
     ///          +----+-----+-------+------+----------+----------+
     ///          | 1  |  1  |   1   |  1   | Variable |    2     |
     ///          +----+-----+-------+------+----------+----------+
-    ///
+    /// ```
     ///
     /// # Help
     ///
     /// To debug request use a netcat server with hexadecimal output to parse the hidden bytes:
     ///
-    /// ```
+    /// ```bash
     ///    $ nc -k -l 80 | hexdump -C
     /// ```
     ///

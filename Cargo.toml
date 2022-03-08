@@ -7,7 +7,7 @@ license = "MIT"
 description = "Fast SOCKS5 client/server implementation written in Rust async/.await (tokio)"
 repository = "https://github.com/dizda/fast-socks5"
 categories = ["asynchronous", "network-programming", "command-line-utilities", "proxy" ,"authentication" ]
-keywords = ["io", "socks5", "proxy", "vpn", "async", "tokio", "socks"]
+keywords = ["io", "proxy", "vpn", "async", "socks"]
 
 [dependencies]
 log = "0.4"

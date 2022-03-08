@@ -1,19 +1,26 @@
+use crate::new_udp_header;
+use crate::parse_udp_request;
 use crate::read_exact;
 use crate::ready;
 use crate::util::target_addr::{read_address, TargetAddr};
+use crate::Socks5Command;
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::time::timeout;
-use tokio_stream::{Stream, StreamExt};
+use tokio::try_join;
+use tokio_stream::Stream;
 
 #[derive(Clone)]
 pub struct Config {
@@ -166,6 +173,9 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin> {
     config: Arc<Config>,
     auth: AuthenticationMethod,
     target_addr: Option<TargetAddr>,
+    cmd: Option<Socks5Command>,
+    /// Socket address which will be used in the reply message.
+    reply_ip: Option<IpAddr>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
@@ -175,7 +185,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             config,
             auth: AuthenticationMethod::None,
             target_addr: None,
+            cmd: None,
+            reply_ip: None,
         }
+    }
+
+    /// Set the bind IP address in Socks5Reply.
+    /// 
+    /// Only the inner socket owner knows the correct reply bind addr, so leave this field to be 
+    /// populated. For those strict clients, users can use this function to set the correct IP 
+    /// address.
+    /// 
+    /// Most popular SOCKS5 clients [1] [2] ignore BND.ADDR and BND.PORT the reply of command 
+    /// CONNECT, but this field could be useful in some other command, such as UDP ASSOCIATE.
+    /// 
+    /// [1]. https://github.com/chromium/chromium/blob/bd2c7a8b65ec42d806277dd30f138a673dec233a/net/socket/socks5_client_socket.cc#L481
+    /// [2]. https://github.com/curl/curl/blob/d15692ebbad5e9cfb871b0f7f51a73e43762cee2/lib/socks.c#L978
+    pub fn set_reply_ip(&mut self, addr: IpAddr) {
+        self.reply_ip = Some(addr);
     }
 
     /// Process clients SOCKS requests
@@ -204,7 +231,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Ok(_) => {}
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
-                self.reply(&e).await?;
+                self.reply_error(&e).await?;
                 return Err(e.into()); // propagate the error to end this connection's task
             }
             // if any other errors has been detected, we simply end connection's task
@@ -224,10 +251,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// or deny the handshake (thus the connection).
     ///
     /// # Examples
-    ///
+    /// ```text
     ///                    {SOCKS Version, methods-length}
     ///     eg. (non-auth) {5, 2}
     ///     eg. (auth)     {5, 3}
+    /// ```
     ///
     async fn get_methods(&mut self) -> Result<Vec<u8>> {
         trace!("Socks5Socket: get_methods()");
@@ -261,16 +289,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// # Request
     ///
     ///  Client send an array of 3 entries: [0, 1, 2]
-    ///
+    /// ```text
     ///                          {SOCKS Version,  Authentication chosen}
     ///     eg. (non-auth)       {5, 0}
     ///     eg. (GSSAPI)         {5, 1}
     ///     eg. (auth)           {5, 2}
+    /// ```
     ///
     /// # Response
-    ///     
+    /// ```text
     ///     eg. (accept non-auth) {5, 0x00}
     ///     eg. (non-acceptable)  {5, 0xff}
+    /// ```
     ///
     async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<()> {
         let method_supported;
@@ -387,24 +417,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(())
     }
 
-    /// Reply to the client with the correct reply code according to the RFC.
-    async fn reply(&mut self, error: &ReplyError) -> Result<()> {
-        let reply = &[
-            consts::SOCKS5_VERSION,
-            error.as_u8(), // transform the error into byte code
-            0x00,          // reserved
-            1,             // address type (ipv4, v6, domain)
-            127,           // ip
-            0,
-            0,
-            1,
-            0, // port
-            0,
-        ];
+    /// Reply error to the client with the reply code according to the RFC.
+    async fn reply_error(&mut self, error: &ReplyError) -> Result<()> {
+        let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
         debug!("reply error to be written: {:?}", &reply);
 
         self.inner
-            .write(reply)
+            .write(&reply)
             .await
             .context("Can't write the reply!")?;
 
@@ -417,12 +436,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
     /// # Request
-    ///
+    /// ```text
     ///          +----+-----+-------+------+----------+----------+
     ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
     ///          +----+-----+-------+------+----------+----------+
     ///          | 1  |  1  |   1   |  1   | Variable |    2     |
     ///          +----+-----+-------+------+----------+----------+
+    /// ```
     ///
     /// It the request is correct, it should returns a ['SocketAddr'].
     ///
@@ -441,8 +461,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             return Err(SocksError::UnsupportedSocksVersion(version));
         }
 
-        if cmd != consts::SOCKS5_CMD_TCP_CONNECT {
-            return Err(ReplyError::CommandNotSupported.into());
+        match Socks5Command::from_u8(cmd) {
+            None => return Err(ReplyError::CommandNotSupported.into()),
+            Some(cmd) => match cmd {
+                Socks5Command::TCPConnect | Socks5Command::UDPAssociate => {
+                    self.cmd = Some(cmd);
+                }
+                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
+            },
         }
 
         // Guess address type
@@ -477,9 +503,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(())
     }
 
+    /// Execute the socks5 command that the client wants.
+    async fn execute_command(&mut self) -> Result<()> {
+        match &self.cmd {
+            None => return Err(ReplyError::CommandNotSupported.into()),
+            Some(cmd) => match cmd {
+                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
+                Socks5Command::TCPConnect => return self.execute_command_connect().await,
+                Socks5Command::UDPAssociate => return self.execute_command_udp_assoc().await,
+            },
+        }
+    }
+
     /// Connect to the target address that the client wants,
     /// then forward the data between them (client <=> target address).
-    async fn execute_command(&mut self) -> Result<()> {
+    async fn execute_command_connect(&mut self) -> Result<()> {
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
         let addr = self
@@ -520,20 +558,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Connected to remote destination");
 
-        // TODO: convert this to the real address
         self.inner
-            .write(&[
-                consts::SOCKS5_VERSION,
-                consts::SOCKS5_REPLY_SUCCEEDED,
-                0x00, // reserved
-                1,    // address type (ipv4, v6, domain)
-                127,  // ip
-                0,
-                0,
-                1,
-                0, // port
-                0,
-            ])
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            ))
             .await
             .context("Can't write successful reply")?;
 
@@ -542,6 +571,41 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         debug!("Wrote success");
 
         transfer(&mut self.inner, outbound).await
+    }
+
+    /// Bind to a random UDP port, wait for the traffic from
+    /// the client, and then forward the data to the remote addr.
+    async fn execute_command_udp_assoc(&mut self) -> Result<()> {
+        // The DST.ADDR and DST.PORT fields contain the address and port that
+        // the client expects to use to send UDP datagrams on for the
+        // association. The server MAY use this information to limit access
+        // to the association.
+        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+        //
+        // We do NOT limit the access from the client currently in this implementation.
+        let _not_used = self.target_addr.as_ref();
+
+        // Listen with UDP6 socket, so the client can connect to it with either
+        // IPv4 or IPv6.
+        let peer_sock = UdpSocket::bind("[::]:0").await?;
+
+        // Respect the pre-populated reply IP address.
+        self.inner
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(
+                    self.reply_ip.context("invalid reply ip")?,
+                    peer_sock.local_addr()?.port(),
+                ),
+            ))
+            .await
+            .context("Can't write successful reply")?;
+
+        debug!("Wrote success");
+
+        transfer_udp(peer_sock).await?;
+
+        Ok(())
     }
 
     pub fn target_addr(&self) -> Option<&TargetAddr> {
@@ -564,6 +628,60 @@ where
         Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
         Err(err) => error!("transfer error: {:?}", err),
     };
+
+    Ok(())
+}
+
+async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+    let mut buf = vec![0u8; 0x10000];
+    loop {
+
+        let (size, client_addr) = inbound.recv_from(&mut buf).await?;
+        debug!("Server recieve udp from {}", client_addr);
+        inbound.connect(client_addr).await?;
+
+        let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
+
+        if frag != 0 {
+            debug!("Discard UDP frag packets sliently.");
+            return Ok(());
+        }
+
+        debug!("Server forward to packet to {}", target_addr);
+        let mut target_addr = target_addr
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+
+        target_addr.set_ip(match target_addr.ip() {
+            std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
+            v6 @ std::net::IpAddr::V6(_) => v6,
+        });
+        outbound.send_to(data, target_addr).await?;
+    }
+}
+
+async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+    let mut buf = vec![0u8; 0x10000];
+    loop {
+        let (size, remote_addr) = outbound.recv_from(&mut buf).await?;
+        debug!("Recieve packet from {}", remote_addr);
+
+        let mut data = new_udp_header(remote_addr)?;
+        data.extend_from_slice(&buf[..size]);
+        inbound.send(&data).await?;
+    }
+}
+
+async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
+    let outbound = UdpSocket::bind("[::]:0").await?;
+
+    let req_fut = handle_udp_request(&inbound, &outbound);
+    let res_fut = handle_udp_response(&inbound, &outbound);
+    match try_join!(req_fut, res_fut) {
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
 
     Ok(())
 }
@@ -610,15 +728,44 @@ where
     }
 }
 
+/// Generate reply code according to the RFC.
+fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
+    let (addr_type, mut ip_oct, mut port) = match sock_addr {
+        SocketAddr::V4(sock) => (
+            consts::SOCKS5_ADDR_TYPE_IPV4,
+            sock.ip().octets().to_vec(),
+            sock.port().to_be_bytes().to_vec(),
+        ),
+        SocketAddr::V6(sock) => (
+            consts::SOCKS5_ADDR_TYPE_IPV6,
+            sock.ip().octets().to_vec(),
+            sock.port().to_be_bytes().to_vec(),
+        ),
+    };
+
+    let mut reply = vec![
+        consts::SOCKS5_VERSION,
+        error.as_u8(), // transform the error into byte code
+        0x00,          // reserved
+        addr_type,     // address type (ipv4, v6, domain)
+    ];
+    reply.append(&mut ip_oct);
+    reply.append(&mut port);
+
+    return reply;
+}
+
 #[cfg(test)]
 mod test {
     use crate::server::Socks5Server;
+    use tokio_test::block_on;
 
     #[test]
     fn test_bind() {
-        //dza
-        async {
+        let f = async {
             let _server = Socks5Server::bind("127.0.0.1:1080").await.unwrap();
         };
+
+        block_on(f);
     }
 }

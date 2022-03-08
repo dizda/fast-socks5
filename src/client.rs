@@ -1,14 +1,18 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
-use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
+use crate::{
+    consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result,
+    Socks5Command, SocksError,
+};
 use anyhow::Context;
 use std::io;
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::task::Poll;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::{TcpStream, UdpSocket};
 
 const MAX_ADDR_LEN: usize = 260;
 
@@ -77,15 +81,19 @@ where
         Ok(stream)
     }
 
-    pub async fn request(&mut self, target_addr: TargetAddr) -> Result<()> {
+    pub async fn request(
+        &mut self,
+        cmd: Socks5Command,
+        target_addr: TargetAddr,
+    ) -> Result<TargetAddr> {
         self.target_addr = Some(target_addr);
 
         // Request Lifecycle
         info!("Requesting headers `{:?}`...", &self.target_addr);
-        self.request_header().await?;
-        self.read_request_reply().await?;
+        self.request_header(cmd).await?;
+        let bind_addr = self.read_request_reply().await?;
 
-        Ok(())
+        Ok(bind_addr)
     }
 
     /// Decide to whether or not, accept the authentication method
@@ -98,10 +106,11 @@ where
     /// or deny the handshake (thus the connection).
     ///
     /// # Examples
-    ///
+    /// ```text
     ///                    {SOCKS Version, methods-length}
     ///     eg. (non-auth) {5, 2}
     ///     eg. (auth)     {5, 3}
+    /// ```
     ///
     async fn send_version_and_methods(
         &mut self,
@@ -136,16 +145,18 @@ where
     /// # Request
     ///
     ///  Client send an array of 3 entries: [0, 1, 2]
-    ///
+    /// ```text
     ///                          {SOCKS Version,  Authentication chosen}
     ///     eg. (non-auth)       {5, 0}
     ///     eg. (GSSAPI)         {5, 1}
     ///     eg. (auth)           {5, 2}
+    /// ```
     ///
     /// # Response
-    ///
+    /// ```text
     ///     eg. (accept non-auth) {5, 0x00}
     ///     eg. (non-acceptable)  {5, 0xff}
+    /// ```
     ///
     async fn which_method_accepted(&mut self, methods: Vec<AuthenticationMethod>) -> Result<()> {
         let [version, method] =
@@ -236,69 +247,76 @@ where
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
     /// # Request
-    ///
+    /// ```test
     ///          +----+-----+-------+------+----------+----------+
     ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
     ///          +----+-----+-------+------+----------+----------+
     ///          | 1  |  1  |   1   |  1   | Variable |    2     |
     ///          +----+-----+-------+------+----------+----------+
-    ///
+    /// ```
     ///
     /// # Help
     ///
     /// To debug request use a netcat server with hexadecimal output to parse the hidden bytes:
     ///
-    /// ```
+    /// ```bash
     ///    $ nc -k -l 80 | hexdump -C
     /// ```
     ///
-    async fn request_header(&mut self) -> Result<()> {
+    async fn request_header(&mut self, cmd: Socks5Command) -> Result<()> {
         let mut packet = [0u8; MAX_ADDR_LEN + 3];
         let padding; // maximum len of the headers sent
                      // build our request packet with (socks version, Command, reserved)
-        packet[..3].copy_from_slice(&[
-            consts::SOCKS5_VERSION,
-            consts::SOCKS5_CMD_TCP_CONNECT,
-            0x00,
-        ]);
+        packet[..3].copy_from_slice(&[consts::SOCKS5_VERSION, cmd.as_u8(), 0x00]);
 
-        match self
-            .target_addr
-            .as_ref()
-            .context("target addr should be present")?
-        {
-            TargetAddr::Ip(SocketAddr::V4(addr)) => {
-                debug!("TargetAddr::IpV4");
-                padding = 10;
+        match self.target_addr.as_ref() {
+            None => {
+                if cmd == Socks5Command::UDPAssociate {
+                    debug!("UDPAssociate without target_addr, fallback to zeros.");
+                    padding = 10;
 
-                packet[3] = 0x01;
-                debug!("addr ip {:?}", (*addr.ip()).octets());
-                packet[4..8].copy_from_slice(&(addr.ip()).octets()); // ip
-                packet[8..padding].copy_from_slice(&addr.port().to_be_bytes()); // port
-            }
-            TargetAddr::Ip(SocketAddr::V6(addr)) => {
-                debug!("TargetAddr::IpV6");
-                padding = 22;
-
-                packet[3] = 0x04;
-                debug!("addr ip {:?}", (*addr.ip()).octets());
-                packet[4..20].copy_from_slice(&(addr.ip()).octets()); // ip
-                packet[20..padding].copy_from_slice(&addr.port().to_be_bytes());
-                // port
-            }
-            TargetAddr::Domain(ref domain, port) => {
-                debug!("TargetAddr::Domain");
-                if domain.len() > u8::max_value() as usize {
-                    return Err(SocksError::ExceededMaxDomainLen(domain.len()));
+                    packet[3] = 0x01;
+                    packet[4..8].copy_from_slice(&[0, 0, 0, 0]); // ip
+                    packet[8..padding].copy_from_slice(&[0, 0]); // port
+                } else {
+                    return Err(anyhow::Error::msg("target addr should be present").into());
                 }
-                padding = 5 + domain.len() + 2;
-
-                packet[3] = 0x03; // Specify domain type
-                packet[4] = domain.len() as u8; // domain length
-                packet[5..(5 + domain.len())].copy_from_slice(domain.as_bytes()); // domain content
-                packet[(5 + domain.len())..padding].copy_from_slice(&port.to_be_bytes());
-                // port content (.to_be_bytes() convert from u16 to u8 type)
             }
+            Some(target_addr) => match target_addr {
+                TargetAddr::Ip(SocketAddr::V4(addr)) => {
+                    debug!("TargetAddr::IpV4");
+                    padding = 10;
+
+                    packet[3] = 0x01;
+                    debug!("addr ip {:?}", (*addr.ip()).octets());
+                    packet[4..8].copy_from_slice(&(addr.ip()).octets()); // ip
+                    packet[8..padding].copy_from_slice(&addr.port().to_be_bytes());
+                    // port
+                }
+                TargetAddr::Ip(SocketAddr::V6(addr)) => {
+                    debug!("TargetAddr::IpV6");
+                    padding = 22;
+
+                    packet[3] = 0x04;
+                    debug!("addr ip {:?}", (*addr.ip()).octets());
+                    packet[4..20].copy_from_slice(&(addr.ip()).octets()); // ip
+                    packet[20..padding].copy_from_slice(&addr.port().to_be_bytes());
+                    // port
+                }
+                TargetAddr::Domain(ref domain, port) => {
+                    debug!("TargetAddr::Domain");
+                    if domain.len() > u8::max_value() as usize {
+                        return Err(SocksError::ExceededMaxDomainLen(domain.len()));
+                    }
+                    padding = 5 + domain.len() + 2;
+
+                    packet[3] = 0x03; // Specify domain type
+                    packet[4] = domain.len() as u8; // domain length
+                    packet[5..(5 + domain.len())].copy_from_slice(domain.as_bytes()); // domain content
+                    packet[(5 + domain.len())..padding].copy_from_slice(&port.to_be_bytes());
+                    // port content (.to_be_bytes() convert from u16 to u8 type)
+                }
+            },
         }
 
         debug!("Bytes long version: {:?}", &packet[..]);
@@ -322,7 +340,7 @@ where
 
     /// The server send a confirmation (reply) that he had successfully connected (or not) to the
     /// remote server.
-    async fn read_request_reply(&mut self) -> Result<()> {
+    async fn read_request_reply(&mut self) -> Result<TargetAddr> {
         let [version, reply, rsv, address_type] =
             read_exact!(self.socket, [0u8; 4]).context("Received malformed reply")?;
 
@@ -343,9 +361,9 @@ where
         }
 
         let address = read_address(&mut self.socket, address_type).await?;
-        info!("Remote server connected to {}.", address);
+        info!("Remote server bind on {}.", address);
 
-        Ok(())
+        Ok(address)
     }
 
     pub fn get_socket(self) -> S {
@@ -357,6 +375,139 @@ where
     }
 
     pub fn get_socket_mut(&mut self) -> &mut S {
+        &mut self.socket
+    }
+}
+
+/// A SOCKS5 UDP client.
+#[derive(Debug)]
+pub struct Socks5Datagram<S: AsyncRead + AsyncWrite + Unpin> {
+    socket: UdpSocket,
+    // keeps the session alive
+    #[allow(dead_code)]
+    stream: Socks5Stream<S>,
+    proxy_addr: Option<TargetAddr>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
+    /// Creates a UDP socket bound to the specified address which will have its
+    /// traffic routed through the specified proxy.
+    pub async fn bind<U>(backing_socket: S, client_bind_addr: U) -> Result<Socks5Datagram<S>>
+    where
+        U: ToSocketAddrs,
+    {
+        Self::bind_internal(backing_socket, client_bind_addr, None).await
+    }
+    /// Creates a UDP socket bound to the specified address which will have its
+    /// traffic routed through the specified proxy. The given username and password
+    /// is used to authenticate to the SOCKS proxy.
+    pub async fn bind_with_password<U>(
+        backing_socket: S,
+        client_bind_addr: U,
+        username: &str,
+        password: &str,
+    ) -> Result<Socks5Datagram<S>>
+    where
+        U: ToSocketAddrs,
+    {
+        let auth = AuthenticationMethod::Password {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        };
+        Self::bind_internal(backing_socket, client_bind_addr, Some(auth)).await
+    }
+
+    async fn bind_internal<U>(
+        backing_socket: S,
+        client_bind_addr: U,
+        auth: Option<AuthenticationMethod>,
+    ) -> Result<Socks5Datagram<S>>
+    where
+        U: ToSocketAddrs,
+    {
+        let client_bind_addr = client_bind_addr
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+        let out_sock = UdpSocket::bind(client_bind_addr).await?;
+        info!("UdpSocket client socket bind to {}", client_bind_addr);
+
+        // Init socks5 stream.
+        let mut proxy_stream =
+            Socks5Stream::use_stream(backing_socket, auth, Config::default()).await?;
+
+        // we don't know what our IP is from the perspective of the proxy, so
+        // don't try to pass `addr` in here.
+        let client_src = TargetAddr::Ip("[::]:0".parse().unwrap());
+        let proxy_addr = proxy_stream
+            .request(Socks5Command::UDPAssociate, client_src)
+            .await?;
+
+        let proxy_addr_resolved = proxy_addr
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+        out_sock.connect(proxy_addr_resolved).await?;
+        info!("UdpSocket client connected to {}", proxy_addr_resolved);
+
+        Ok(Socks5Datagram {
+            socket: out_sock,
+            stream: proxy_stream,
+            proxy_addr: Some(proxy_addr),
+        })
+    }
+
+    /// Like `UdpSocket::send_to`.
+    ///
+    /// # Note
+    ///
+    /// The SOCKS protocol inserts a header at the beginning of the message. The
+    /// header will be 10 bytes for an IPv4 address, 22 bytes for an IPv6
+    /// address, and 7 bytes plus the length of the domain for a domain address.
+    pub async fn send_to<A>(&self, data: &[u8], addr: A) -> Result<usize>
+    where
+        A: ToTargetAddr,
+    {
+        println!("client send packet to {:?}", self.socket);
+        let mut buf = new_udp_header(addr)?;
+        buf.extend_from_slice(data);
+
+        return Ok(self.socket.send(&buf).await?);
+    }
+
+    /// Like `UdpSocket::recv_from`.
+    pub async fn recv_from(&self, data_store: &mut [u8]) -> Result<(usize, TargetAddr)> {
+        let mut buf = [0u8; 0x10000];
+        let (size, _) = self.socket.recv_from(&mut buf).await?;
+
+        let (frag, target_addr, data) = parse_udp_request(&mut buf[..size]).await?;
+
+        if frag != 0 {
+            return Err(SocksError::Other(anyhow::anyhow!(
+                "Unsupported frag value."
+            )));
+        }
+
+        data_store[..data.len()].copy_from_slice(data);
+        Ok((data.len(), target_addr))
+    }
+
+    /// Returns the address of the proxy-side UDP socket through which all
+    /// messages will be routed.
+    pub fn proxy_addr(&self) -> Result<&TargetAddr> {
+        Ok(self
+            .proxy_addr
+            .as_ref()
+            .context("proxy addr is not ready")?)
+    }
+
+    /// Returns a shared reference to the inner socket.
+    pub fn get_ref(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    /// Returns a mutable reference to the inner socket.
+    pub fn get_mut(&mut self) -> &mut UdpSocket {
         &mut self.socket
     }
 }
@@ -373,7 +524,15 @@ impl Socks5Stream<TcpStream> {
     where
         T: ToSocketAddrs,
     {
-        Self::connect_raw(socks_server, target_addr, target_port, None, config).await
+        Self::connect_raw(
+            Socks5Command::TCPConnect,
+            socks_server,
+            target_addr,
+            target_port,
+            None,
+            config,
+        )
+        .await
     }
 
     /// Connect with credentials
@@ -390,12 +549,21 @@ impl Socks5Stream<TcpStream> {
     {
         let auth = AuthenticationMethod::Password { username, password };
 
-        Self::connect_raw(socks_server, target_addr, target_port, Some(auth), config).await
+        Self::connect_raw(
+            Socks5Command::TCPConnect,
+            socks_server,
+            target_addr,
+            target_port,
+            Some(auth),
+            config,
+        )
+        .await
     }
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
-    async fn connect_raw<T>(
+    pub async fn connect_raw<T>(
+        cmd: Socks5Command,
         socks_server: T,
         target_addr: String,
         target_port: u16,
@@ -405,7 +573,13 @@ impl Socks5Stream<TcpStream> {
     where
         T: ToSocketAddrs,
     {
-        let socket = TcpStream::connect(&socks_server).await?;
+        let socket = TcpStream::connect(
+            socks_server
+                .to_socket_addrs()?
+                .next()
+                .context("unreachable")?,
+        )
+        .await?;
         info!("Connected @ {}", &socket.peer_addr()?);
 
         // Specify the target, here domain name, dns will be resolved on the server side
@@ -415,7 +589,7 @@ impl Socks5Stream<TcpStream> {
 
         // upgrade the TcpStream to Socks5Stream
         let mut socks_stream = Self::use_stream(socket, auth, config).await?;
-        socks_stream.request(target_addr).await?;
+        socks_stream.request(cmd, target_addr).await?;
 
         Ok(socks_stream)
     }

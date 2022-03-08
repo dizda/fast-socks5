@@ -6,9 +6,15 @@ pub mod client;
 pub mod server;
 pub mod util;
 
+use anyhow::Context;
 use std::fmt;
 use std::io;
 use thiserror::Error;
+use util::target_addr::read_address;
+use util::target_addr::TargetAddr;
+use util::target_addr::ToTargetAddr;
+
+use tokio::io::AsyncReadExt;
 
 #[rustfmt::skip]
 pub mod consts {
@@ -36,6 +42,37 @@ pub mod consts {
     pub const SOCKS5_REPLY_TTL_EXPIRED:                u8 = 0x06;
     pub const SOCKS5_REPLY_COMMAND_NOT_SUPPORTED:      u8 = 0x07;
     pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Socks5Command {
+    TCPConnect,
+    TCPBind,
+    UDPAssociate,
+}
+
+#[allow(dead_code)]
+impl Socks5Command {
+    #[inline]
+    #[rustfmt::skip]
+    fn as_u8(&self) -> u8 {
+        match self {
+            Socks5Command::TCPConnect   => consts::SOCKS5_CMD_TCP_CONNECT,
+            Socks5Command::TCPBind      => consts::SOCKS5_CMD_TCP_BIND,
+            Socks5Command::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
+        }
+    }
+
+    #[inline]
+    #[rustfmt::skip]
+    fn from_u8(code: u8) -> Option<Socks5Command> {
+        match code {
+            consts::SOCKS5_CMD_TCP_CONNECT      => Some(Socks5Command::TCPConnect),
+            consts::SOCKS5_CMD_TCP_BIND         => Some(Socks5Command::TCPBind),
+            consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Socks5Command::UDPAssociate),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -123,6 +160,8 @@ pub type Result<T, E = SocksError> = core::result::Result<T, E>;
 /// SOCKS5 reply code
 #[derive(Error, Debug, Copy, Clone)]
 pub enum ReplyError {
+    #[error("Succeeded")]
+    Succeeded,
     #[error("General failure")]
     GeneralFailure,
     #[error("Connection not allowed by ruleset")]
@@ -147,6 +186,7 @@ impl ReplyError {
     #[rustfmt::skip]
     pub fn as_u8(self) -> u8 {
         match self {
+            ReplyError::Succeeded               => consts::SOCKS5_REPLY_SUCCEEDED,
             ReplyError::GeneralFailure          => consts::SOCKS5_REPLY_GENERAL_FAILURE,
             ReplyError::ConnectionNotAllowed    => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
             ReplyError::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
@@ -163,6 +203,7 @@ impl ReplyError {
     #[rustfmt::skip]
     pub fn from_u8(code: u8) -> ReplyError {
         match code {
+            consts::SOCKS5_REPLY_SUCCEEDED                  => ReplyError::Succeeded,
             consts::SOCKS5_REPLY_GENERAL_FAILURE            => ReplyError::GeneralFailure,
             consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED     => ReplyError::ConnectionNotAllowed,
             consts::SOCKS5_REPLY_NETWORK_UNREACHABLE        => ReplyError::NetworkUnreachable,
@@ -174,5 +215,176 @@ impl ReplyError {
 //            _                                               => ReplyError::OtherReply(code),
             _                                               => unreachable!("ReplyError code unsupported."),
         }
+    }
+}
+
+/// Generate UDP header
+///
+/// # UDP Request header structure.
+/// ```text
+/// +----+------+------+----------+----------+----------+
+/// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
+/// +----+------+------+----------+----------+----------+
+/// | 2  |  1   |  1   | Variable |    2     | Variable |
+/// +----+------+------+----------+----------+----------+
+///
+/// The fields in the UDP request header are:
+///
+///     o  RSV  Reserved X'0000'
+///     o  FRAG    Current fragment number
+///     o  ATYP    address type of following addresses:
+///        o  IP V4 address: X'01'
+///        o  DOMAINNAME: X'03'
+///        o  IP V6 address: X'04'
+///     o  DST.ADDR       desired destination address
+///     o  DST.PORT       desired destination port
+///     o  DATA     user data
+/// ```
+pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>> {
+    let mut header = vec![
+        0, 0, // RSV
+        0, // FRAG
+    ];
+    header.append(&mut target_addr.to_target_addr()?.to_be_bytes()?);
+
+    Ok(header)
+}
+
+/// Parse data from UDP client on raw buffer, return (frag, target_addr, payload).
+pub async fn parse_udp_request<'a>(mut req: &'a [u8]) -> Result<(u8, TargetAddr, &'a [u8])> {
+    let rsv = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+
+    if !rsv.eq(&[0u8; 2]) {
+        return Err(ReplyError::GeneralFailure.into());
+    }
+
+    let [frag, atyp] = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+
+    let target_addr = read_address(&mut req, atyp).await.map_err(|e| {
+        // print explicit error
+        error!("{:#}", e);
+        // then convert it to a reply
+        ReplyError::AddressTypeNotSupported
+    })?;
+
+    Ok((frag, target_addr, req))
+}
+
+#[cfg(test)]
+mod test {
+    use anyhow::Result;
+    use tokio::{
+        net::{TcpListener, TcpStream, UdpSocket},
+        sync::oneshot::Sender,
+    };
+
+    use crate::{
+        client,
+        server::{self, SimpleUserPassword},
+    };
+    use std::{
+        net::{SocketAddr, ToSocketAddrs},
+        sync::Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+    use tokio_test::block_on;
+
+    async fn setup_socks_server(
+        proxy_addr: &str,
+        auth: Option<SimpleUserPassword>,
+        tx: Sender<SocketAddr>,
+    ) -> Result<()> {
+        let mut config = server::Config::default();
+        match auth {
+            None => {}
+            Some(up) => {
+                config.set_authentication(up);
+            }
+        }
+
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(proxy_addr).await?;
+        tx.send(listener.local_addr()?).unwrap();
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let mut socks5_socket = server::Socks5Socket::new(stream, config.clone());
+            socks5_socket.set_reply_ip(proxy_addr.parse::<SocketAddr>().unwrap().ip());
+
+            socks5_socket.upgrade_to_socks5().await?;
+        }
+    }
+
+    async fn google(mut socket: TcpStream) -> Result<()> {
+        socket.write_all(b"GET / HTTP/1.0\r\n\r\n").await?;
+        let mut result = vec![];
+        socket.read_to_end(&mut result).await?;
+
+        println!("{}", String::from_utf8_lossy(&result));
+        assert!(result.starts_with(b"HTTP/1.0"));
+        assert!(result.ends_with(b"</HTML>\r\n") || result.ends_with(b"</html>"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn google_no_auth() {
+        block_on(async {
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+
+            let socket = client::Socks5Stream::connect(
+                rx.await.unwrap(),
+                "google.com".to_owned(),
+                80,
+                client::Config::default(),
+            )
+            .await
+            .unwrap();
+            google(socket.get_socket()).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn udp_assosiate_no_auth() {
+        env_logger::init();
+        block_on(async {
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
+
+            let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
+                .await
+                .unwrap();
+
+            associate(tunnel, "[::1]:40235")
+                .await
+                .expect("error on associate");
+        });
+    }
+
+    async fn associate(socks: client::Socks5Datagram<TcpStream>, mock_server: &str) -> Result<()> {
+        let socket = UdpSocket::bind(mock_server).await?;
+
+        socks
+            .send_to(
+                b"hello world!",
+                mock_server.to_socket_addrs()?.next().unwrap(),
+            )
+            .await?;
+        println!("Send packet to {}", mock_server);
+
+        let mut buf = [0; 13];
+        let (len, addr) = socket.recv_from(&mut buf).await?;
+        assert_eq!(len, 12);
+        assert_eq!(&buf[..12], b"hello world!");
+
+        socket.send_to(b"hello world!", addr).await?;
+
+        let len = socks.recv_from(&mut buf).await?.0;
+        assert_eq!(len, 12);
+        assert_eq!(&buf[..12], b"hello world!");
+
+        Ok(())
     }
 }

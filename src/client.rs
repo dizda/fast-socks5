@@ -468,7 +468,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     where
         A: ToTargetAddr,
     {
-        println!("client send packet to {:?}", self.socket);
         let mut buf = new_udp_header(addr)?;
         buf.extend_from_slice(data);
 

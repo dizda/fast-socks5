@@ -301,6 +301,7 @@ mod test {
         tx: Sender<SocketAddr>,
     ) -> Result<()> {
         let mut config = server::Config::default();
+        config.set_udp_support(true);
         match auth {
             None => {}
             Some(up) => {

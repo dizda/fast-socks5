@@ -305,7 +305,7 @@ where
                 }
                 TargetAddr::Domain(ref domain, port) => {
                     debug!("TargetAddr::Domain");
-                    if domain.len() > u8::max_value() as usize {
+                    if domain.len() > u8::MAX as usize {
                         return Err(SocksError::ExceededMaxDomainLen(domain.len()));
                     }
                     padding = 5 + domain.len() + 2;

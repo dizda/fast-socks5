@@ -362,6 +362,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
+            // binding source address used to communicate with the socks5 server. 
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();
@@ -403,6 +405,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
+            // binding source address used to communicate with the socks5 server. 
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();

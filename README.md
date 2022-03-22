@@ -50,8 +50,7 @@ curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
 ## TODO
 - Tests have to be implemented
 - Better Rust doc
-- Bind command not implemented
-- UDP command not implemented
+- UDP bind command not implemented
 
 ## Inspired by
 

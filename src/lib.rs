@@ -284,11 +284,16 @@ mod test {
     };
     use std::{
         net::{SocketAddr, ToSocketAddrs},
+        num::ParseIntError,
         sync::Arc,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
     use tokio_test::block_on;
+
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     async fn setup_socks_server(
         proxy_addr: &str,
@@ -296,6 +301,7 @@ mod test {
         tx: Sender<SocketAddr>,
     ) -> Result<()> {
         let mut config = server::Config::default();
+        config.set_udp_support(true);
         match auth {
             None => {}
             Some(up) => {
@@ -329,6 +335,7 @@ mod test {
 
     #[test]
     fn google_no_auth() {
+        init();
         block_on(async {
             let (tx, rx) = oneshot::channel();
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
@@ -346,45 +353,101 @@ mod test {
     }
 
     #[test]
-    fn udp_assosiate_no_auth() {
-        env_logger::init();
+    fn mock_udp_assosiate_no_auth() {
+        init();
         block_on(async {
+            const MOCK_ADDRESS: &str = "[::1]:40235";
+
             let (tx, rx) = oneshot::channel();
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
+            // binding source address used to communicate with the socks5 server. 
+            let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
+                .await
+                .unwrap();
+            let mock_udp_server = UdpSocket::bind(MOCK_ADDRESS).await.unwrap();
+
+            tunnel
+                .send_to(
+                    b"hello world!",
+                    MOCK_ADDRESS.to_socket_addrs().unwrap().next().unwrap(),
+                )
+                .await
+                .unwrap();
+            println!("Send packet to {}", MOCK_ADDRESS);
+
+            let mut buf = [0; 13];
+            let (len, addr) = mock_udp_server.recv_from(&mut buf).await.unwrap();
+            assert_eq!(len, 12);
+            assert_eq!(&buf[..12], b"hello world!");
+
+            mock_udp_server
+                .send_to(b"hello world!", addr)
+                .await
+                .unwrap();
+
+            println!("Recieve packet from {}", MOCK_ADDRESS);
+            let len = tunnel.recv_from(&mut buf).await.unwrap().0;
+            assert_eq!(len, 12);
+            assert_eq!(&buf[..12], b"hello world!");
+        });
+    }
+
+    #[test]
+    fn dns_udp_assosiate_no_auth() {
+        init();
+        block_on(async {
+            const DNS_SERVER: &str = "1.1.1.1:53";
+
+            let (tx, rx) = oneshot::channel();
+            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
+
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
+            // binding source address used to communicate with the socks5 server. 
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();
 
-            associate(tunnel, "[::1]:40235")
-                .await
-                .expect("error on associate");
+            #[rustfmt::skip]
+            tunnel.send_to(
+                &decode_hex(&(
+                    "AAAA".to_owned()   // ID 
+                    + "0100"            // Query parameters
+                    + "0001"            // Number of questions
+                    + "0000"            // Number of answers
+                    + "0000"            // Number of authority records
+                    + "0000"            // Number of additional records
+                    + "076578616d706c65"// Length + hex("example")
+                    + "03636f6d00"      // Length + hex("com") + zero byte
+                    + "0001"            // QTYPE
+                    + "0001"            // QCLASS
+                ))
+                .unwrap(),
+                DNS_SERVER.to_socket_addrs().unwrap().next().unwrap(),
+            ).await.unwrap();
+            println!("Send packet to {}", DNS_SERVER);
+
+            let mut buf = [0; 128];
+            println!("Recieve packet from {}", DNS_SERVER);
+            tunnel.recv_from(&mut buf).await.unwrap();
+            println!("dns response {:?}", buf);
+
+            #[rustfmt::skip]
+            assert!(buf.starts_with(&decode_hex(&(
+                "AAAA".to_owned()   // ID
+                + "8180"            // FLAGS: RCODE=0, No errors reported
+                + "0001"            // One question
+            )).unwrap()));
         });
     }
 
-    async fn associate(socks: client::Socks5Datagram<TcpStream>, mock_server: &str) -> Result<()> {
-        let socket = UdpSocket::bind(mock_server).await?;
-
-        socks
-            .send_to(
-                b"hello world!",
-                mock_server.to_socket_addrs()?.next().unwrap(),
-            )
-            .await?;
-        println!("Send packet to {}", mock_server);
-
-        let mut buf = [0; 13];
-        let (len, addr) = socket.recv_from(&mut buf).await?;
-        assert_eq!(len, 12);
-        assert_eq!(&buf[..12], b"hello world!");
-
-        socket.send_to(b"hello world!", addr).await?;
-
-        let len = socks.recv_from(&mut buf).await?.0;
-        assert_eq!(len, 12);
-        assert_eq!(&buf[..12], b"hello world!");
-
-        Ok(())
+    fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+            .collect()
     }
 }

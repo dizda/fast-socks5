@@ -305,7 +305,7 @@ where
                 }
                 TargetAddr::Domain(ref domain, port) => {
                     debug!("TargetAddr::Domain");
-                    if domain.len() > u8::max_value() as usize {
+                    if domain.len() > u8::MAX as usize {
                         return Err(SocksError::ExceededMaxDomainLen(domain.len()));
                     }
                     padding = 5 + domain.len() + 2;
@@ -392,6 +392,19 @@ pub struct Socks5Datagram<S: AsyncRead + AsyncWrite + Unpin> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// Creates a UDP socket bound to the specified address which will have its
     /// traffic routed through the specified proxy.
+    /// 
+    /// # Arguments
+    /// * `backing_socket` - The underlying socket carrying the socks5 traffic.
+    /// * `client_bind_addr` - A socket address indicates the binding source address used to 
+    /// communicate with the socks5 server.
+    /// 
+    /// # Examples
+    /// ```ignore 
+    /// let backing_socket = TcpStream::connect("127.0.0.1:1080").await.unwrap();
+    /// let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
+    ///     .await
+    ///     .unwrap();
+    /// ```
     pub async fn bind<U>(backing_socket: S, client_bind_addr: U) -> Result<Socks5Datagram<S>>
     where
         U: ToSocketAddrs,
@@ -468,7 +481,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     where
         A: ToTargetAddr,
     {
-        println!("client send packet to {:?}", self.socket);
         let mut buf = new_udp_header(addr)?;
         buf.extend_from_slice(data);
 

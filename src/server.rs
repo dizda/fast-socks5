@@ -32,6 +32,8 @@ pub struct Config {
     dns_resolve: bool,
     /// Enable command execution
     execute_command: bool,
+    /// Enable UDP support
+    allow_udp: bool,
     auth: Option<Arc<dyn Authentication>>,
 }
 
@@ -42,6 +44,7 @@ impl Default for Config {
             skip_auth: false,
             dns_resolve: true,
             execute_command: true,
+            allow_udp: false,
             auth: None,
         }
     }
@@ -98,6 +101,12 @@ impl Config {
     /// Will the server perform dns resolve
     pub fn set_dns_resolve(&mut self, value: bool) -> &mut Self {
         self.dns_resolve = value;
+        self
+    }
+
+    /// Set whether or not to allow udp traffic
+    pub fn set_udp_support(&mut self, value: bool) -> &mut Self {
+        self.allow_udp = value;
         self
     }
 }
@@ -191,14 +200,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     }
 
     /// Set the bind IP address in Socks5Reply.
-    /// 
-    /// Only the inner socket owner knows the correct reply bind addr, so leave this field to be 
-    /// populated. For those strict clients, users can use this function to set the correct IP 
+    ///
+    /// Only the inner socket owner knows the correct reply bind addr, so leave this field to be
+    /// populated. For those strict clients, users can use this function to set the correct IP
     /// address.
-    /// 
-    /// Most popular SOCKS5 clients [1] [2] ignore BND.ADDR and BND.PORT the reply of command 
+    ///
+    /// Most popular SOCKS5 clients [1] [2] ignore BND.ADDR and BND.PORT the reply of command
     /// CONNECT, but this field could be useful in some other command, such as UDP ASSOCIATE.
-    /// 
+    ///
     /// [1]. https://github.com/chromium/chromium/blob/bd2c7a8b65ec42d806277dd30f138a673dec233a/net/socket/socks5_client_socket.cc#L481
     /// [2]. https://github.com/curl/curl/blob/d15692ebbad5e9cfb871b0f7f51a73e43762cee2/lib/socks.c#L978
     pub fn set_reply_ip(&mut self, addr: IpAddr) {
@@ -464,7 +473,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         match Socks5Command::from_u8(cmd) {
             None => return Err(ReplyError::CommandNotSupported.into()),
             Some(cmd) => match cmd {
-                Socks5Command::TCPConnect | Socks5Command::UDPAssociate => {
+                Socks5Command::TCPConnect => {
+                    self.cmd = Some(cmd);
+                }
+                Socks5Command::UDPAssociate => {
+                    if !self.config.allow_udp {
+                        return Err(ReplyError::CommandNotSupported.into());
+                    }
                     self.cmd = Some(cmd);
                 }
                 Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
@@ -510,7 +525,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Some(cmd) => match cmd {
                 Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
                 Socks5Command::TCPConnect => return self.execute_command_connect().await,
-                Socks5Command::UDPAssociate => return self.execute_command_udp_assoc().await,
+                Socks5Command::UDPAssociate => {
+                    if self.config.allow_udp {
+                        return self.execute_command_udp_assoc().await;
+                    } else {
+                        return Err(ReplyError::CommandNotSupported.into());
+                    }
+                }
             },
         }
     }
@@ -635,7 +656,6 @@ where
 async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
     let mut buf = vec![0u8; 0x10000];
     loop {
-
         let (size, client_addr) = inbound.recv_from(&mut buf).await?;
         debug!("Server recieve udp from {}", client_addr);
         inbound.connect(client_addr).await?;

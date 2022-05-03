@@ -3,6 +3,7 @@
 extern crate log;
 
 pub mod client;
+pub mod client4;
 pub mod server;
 pub mod util;
 
@@ -42,6 +43,11 @@ pub mod consts {
     pub const SOCKS5_REPLY_TTL_EXPIRED:                u8 = 0x06;
     pub const SOCKS5_REPLY_COMMAND_NOT_SUPPORTED:      u8 = 0x07;
     pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
+
+    pub const SOCKS4_VERSION:                          u8 = 0x04;
+
+    pub const SOCKS4_CMD_CONNECT:                      u8 = 0x01;
+    pub const SOCKS4_CMD_BIND:                         u8 = 0x02;
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,6 +55,12 @@ pub enum Socks5Command {
     TCPConnect,
     TCPBind,
     UDPAssociate,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Socks4Command {
+    Connect,
+    Bind,
 }
 
 #[allow(dead_code)]
@@ -70,6 +82,28 @@ impl Socks5Command {
             consts::SOCKS5_CMD_TCP_CONNECT      => Some(Socks5Command::TCPConnect),
             consts::SOCKS5_CMD_TCP_BIND         => Some(Socks5Command::TCPBind),
             consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Socks5Command::UDPAssociate),
+            _ => None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl Socks4Command {
+    #[inline]
+    #[rustfmt::skip]
+    fn as_u8(&self) -> u8 {
+        match self {
+            Socks4Command::Connect   => consts::SOCKS4_CMD_CONNECT,
+            Socks4Command::Bind      => consts::SOCKS4_CMD_BIND,
+        }
+    }
+
+    #[inline]
+    #[rustfmt::skip]
+    fn from_u8(code: u8) -> Option<Socks4Command> {
+        match code {
+            consts::SOCKS4_CMD_CONNECT      => Some(Socks4Command::Connect),
+            consts::SOCKS4_CMD_BIND         => Some(Socks4Command::Bind),
             _ => None,
         }
     }
@@ -178,6 +212,12 @@ pub enum ReplyError {
     CommandNotSupported,
     #[error("Address type not supported")]
     AddressTypeNotSupported,
+
+    #[error("Reject different user ID")]
+    RejectDifferentUserId,
+
+    #[error("Unknown response")]
+    UnknownResponse,
     //    OtherReply(u8),
 }
 
@@ -196,6 +236,9 @@ impl ReplyError {
             ReplyError::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
             ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
 //            ReplyError::OtherReply(c)           => c,
+            // TODO
+            ReplyError::RejectDifferentUserId => 93,
+            ReplyError::UnknownResponse => 100
         }
     }
 

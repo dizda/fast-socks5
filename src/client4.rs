@@ -1,16 +1,16 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
-use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
-use crate::{consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result, SocksError, Socks4Command};
+use crate::socks4::{consts, ReplyError, Socks4Command};
+use crate::util::target_addr::{TargetAddr, ToTargetAddr};
+use crate::{Result, SocksError, SocksError::ReplySocks4Error};
 use anyhow::Context;
 use std::io;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::task::Poll;
-use env_logger::Target;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 
 const MAX_ADDR_LEN: usize = 260;
 
@@ -28,10 +28,8 @@ where
 {
     /// Possibility to use a stream already created rather than
     /// creating a whole new `TcpStream::connect()`.
-    pub fn use_stream(
-        socket: S,
-    ) -> Result<Self> {
-        let mut stream = Socks4Stream {
+    pub fn use_stream(socket: S) -> Result<Self> {
+        let stream = Socks4Stream {
             socket,
             target_addr: None,
         };
@@ -72,7 +70,7 @@ where
     ///
     ///   	90: request granted
     ///   	91: request rejected or failed
-    ///   	92: request rejected becasue SOCKS server cannot connect to
+    ///   	92: request rejected because SOCKS server cannot connect to
     ///   	    identd on the client
     ///   	93: request rejected because the client program and identd
     ///  	    report different user-ids
@@ -81,7 +79,7 @@ where
         &mut self,
         cmd: Socks4Command,
         target_addr: TargetAddr,
-        resolve_locally:  bool,
+        resolve_locally: bool,
     ) -> Result<()> {
         let resolved = if target_addr.is_domain() && resolve_locally {
             target_addr.resolve_dns().await?
@@ -96,7 +94,7 @@ where
     }
 
     async fn send_command_request(&mut self, cmd: &Socks4Command) -> Result<()> {
-        let mut packet = [0u8; MAX_ADDR_LEN + 3];
+        let mut packet = [0u8; MAX_ADDR_LEN];
         packet[0] = consts::SOCKS4_VERSION;
         packet[1] = cmd.as_u8();
 
@@ -108,32 +106,33 @@ where
                 Ok(())
             }
             Some(TargetAddr::Ip(SocketAddr::V6(addr))) => {
-                // TODO: use other error
-                Err(SocksError::ReplyError(ReplyError::AddressTypeNotSupported))
+                error!("IPv6 are not supported: {:?}", addr);
+                Err(ReplySocks4Error(ReplyError::AddressTypeNotSupported))
             }
             Some(TargetAddr::Domain(domain, port)) => {
-                println!("domain");
                 packet[2] = (port >> 8) as u8;
                 packet[3] = *port as u8;
                 packet[4..8].copy_from_slice(&[0, 0, 0, 1]);
-                packet[8..domain.len()].copy_from_slice(domain.as_bytes());
+                let domain_bytes = domain.as_bytes();
+                let offset = 8 + domain_bytes.len();
+                packet[8..offset].copy_from_slice(domain_bytes);
                 Ok(())
             }
-            _ => { panic!("Unreachable case"); }
+            _ => {
+                panic!("Unreachable case");
+            }
         }?;
         self.socket.write_all(&packet).await?;
         Ok(())
     }
 
+    #[rustfmt::skip]
     async fn read_command_request(&mut self) -> Result<()> {
-        let [vn, cd, p0, p1, i0, i1, i2, i3] = read_exact!(self.socket, [0u8; 8])?;
-        match cd {
-            90 => Ok(()),
-            // TODO: use separate replies for Socks4
-            91 => Err(SocksError::ReplyError(ReplyError::ConnectionRefused)),
-            92 => Err(SocksError::ReplyError(ReplyError::HostUnreachable)),
-            93 => Err(SocksError::ReplyError(ReplyError::RejectDifferentUserId)),
-            _  => Err(SocksError::ReplyError(ReplyError::UnknownResponse)),
+        let [_, cd] = read_exact!(self.socket, [0u8; 2])?;
+        let reply = ReplyError::from_u8(cd);
+        match reply {
+            ReplyError::Succeeded => Ok(()),
+            _                     => Err(SocksError::ReplySocks4Error(reply))
         }
     }
 
@@ -200,7 +199,9 @@ impl Socks4Stream<TcpStream> {
 
         // upgrade the TcpStream to Socks4Stream
         let mut socks_stream = Self::use_stream(socket)?;
-        socks_stream.request(cmd, target_addr, resolve_locally).await?;
+        socks_stream
+            .request(cmd, target_addr, resolve_locally)
+            .await?;
 
         Ok(socks_stream)
     }
@@ -248,62 +249,115 @@ where
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    pub async fn test_query() {
-        // TODO: replace with local socks4 server
-        //       it requires implementation
-        let tcp = TcpStream::connect("217.17.56.160:4145")
-            .await
-            .expect("should connect to remote");
+    fn get_domain() -> String {
+        "www.google.com".to_string()
+    }
 
-        let mut socks = Socks4Stream::use_stream(tcp)
-            .expect("should wrap to socks stream");
+    async fn get_humans_txt(socks: &mut Socks4Stream<TcpStream>) -> Option<String> {
+        let headers = format!(
+            "GET /humans.txt HTTP/1.1\r\n\
+                     Host: {}\r\n\
+                     User-Agent: fast-socks5/0.1.0\r\n\
+                     Accept: */*\r\n\r\n",
+            get_domain()
+        );
 
-        let domain = "www.google.com";
-        socks.request(
-            Socks4Command::Connect,
-            TargetAddr::Domain(domain.to_string(), 80),
-            true
-        ).await.expect("should send connect successfully");
-
-
-        let headers =
-                format!("GET /humans.txt HTTP/1.1\r\n\
-                         Host: {}\r\n\
-                         User-Agent: fast-socks5/0.1.0\r\n\
-                         Accept: */*\r\n\r\n",
-                domain);
-
-        println!("{:?}", headers);
         socks
             .write_all(headers.as_bytes())
             .await
             .expect("should successfully write");
 
-        let mut response = &mut [0u8; 2048];
-        socks.read(response)
+        let response = &mut [0u8; 2048];
+        socks
+            .read(response)
             .await
             .expect("should successfully read");
+
+        // sometimes google returns body on second request
+        if response[0] == 0 {
+            response.copy_from_slice(&[0u8; 2048]);
+            socks
+                .read(response)
+                .await
+                .expect("should successfully read");
+        }
 
         let response_str = String::from_utf8_lossy(response);
         let response_body = response_str
             .split("\n")
             .into_iter()
             .filter(|x| x.starts_with("Google"))
-            .last();
+            .last()
+            .map(|x| x.to_string());
 
-        assert!(response_body.is_some(), "should contain response body");
+        response_body
+    }
 
+    fn assert_response_body(response_body: &String) {
         let expected =
             "Google is built by a large team of engineers, designers, researchers, robots, \
         and others in many different sites across the globe. It is updated continuously, \
         and built with more tools and technologies than we can shake a stick at. If you'd \
         like to help us out, see careers.google.com.";
-        assert_eq!(expected, response_body.unwrap());
+        assert_eq!(expected, response_body);
     }
+
+    #[tokio::test]
+    pub async fn test_use_stream() {
+        // TODO: replace with local socks4 server
+        //       it requires implementation
+        let tcp = TcpStream::connect("217.17.56.160:4145")
+            .await
+            .expect("should connect to remote");
+
+        let mut socks = Socks4Stream::use_stream(tcp).expect("should wrap to socks stream");
+
+        socks
+            .request(
+                Socks4Command::Connect,
+                TargetAddr::Domain(get_domain(), 80),
+                true,
+            )
+            .await
+            .expect("should send connect successfully");
+
+        let response_body = get_humans_txt(&mut socks)
+            .await
+            .expect("should have response_body");
+
+        assert_response_body(&response_body);
+    }
+
+    #[tokio::test]
+    pub async fn test_use_stream_local_resolve() {
+        let mut socks = Socks4Stream::connect("217.17.56.160:4145", get_domain(), 80, true)
+            .await
+            .expect("should connect successfully to socks4 server");
+
+        let response_body = get_humans_txt(&mut socks)
+            .await
+            .expect("should have response_body");
+
+        assert_response_body(&response_body);
+    }
+
+    // Need to find socks4a supporting proxy or implement
+    // custom server and test using it
+    //
+    // #[tokio::test]
+    // pub async fn test_use_stream_remote_resolve() {
+    //     let mut socks = Socks4Stream::connect("217.17.56.160:4145", get_domain(), 80, false)
+    //         .await
+    //         .expect("should connect successfully to socks4 server");
+    //
+    //     let response_body = get_humans_txt(&mut socks)
+    //         .await
+    //         .expect("should have response_body");
+    //
+    //     assert_response_body(&response_body);
+    // }
 }

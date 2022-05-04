@@ -7,6 +7,8 @@
 ## Features
 
 - An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.
+- An `async`/`.await` [SOCKS4 Client](https://www.openssh.com/txt/socks4.protocol) implementation.
+- An `async`/`.await` [SOCKS4a Client](https://www.openssh.com/txt/socks4a.protocol) implementation.
 - No **unsafe** code
 - Built on-top of `tokio` library
 - Ultra lightweight and scalable

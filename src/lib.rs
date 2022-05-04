@@ -3,9 +3,13 @@
 extern crate log;
 
 pub mod client;
-pub mod client4;
 pub mod server;
 pub mod util;
+
+#[cfg(feature = "socks4")]
+pub mod client4;
+#[cfg(feature = "socks4")]
+pub mod socks4;
 
 use anyhow::Context;
 use std::fmt;
@@ -43,11 +47,6 @@ pub mod consts {
     pub const SOCKS5_REPLY_TTL_EXPIRED:                u8 = 0x06;
     pub const SOCKS5_REPLY_COMMAND_NOT_SUPPORTED:      u8 = 0x07;
     pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
-
-    pub const SOCKS4_VERSION:                          u8 = 0x04;
-
-    pub const SOCKS4_CMD_CONNECT:                      u8 = 0x01;
-    pub const SOCKS4_CMD_BIND:                         u8 = 0x02;
 }
 
 #[derive(Debug, PartialEq)]
@@ -55,12 +54,6 @@ pub enum Socks5Command {
     TCPConnect,
     TCPBind,
     UDPAssociate,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Socks4Command {
-    Connect,
-    Bind,
 }
 
 #[allow(dead_code)]
@@ -82,28 +75,6 @@ impl Socks5Command {
             consts::SOCKS5_CMD_TCP_CONNECT      => Some(Socks5Command::TCPConnect),
             consts::SOCKS5_CMD_TCP_BIND         => Some(Socks5Command::TCPBind),
             consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Socks5Command::UDPAssociate),
-            _ => None,
-        }
-    }
-}
-
-#[allow(dead_code)]
-impl Socks4Command {
-    #[inline]
-    #[rustfmt::skip]
-    fn as_u8(&self) -> u8 {
-        match self {
-            Socks4Command::Connect   => consts::SOCKS4_CMD_CONNECT,
-            Socks4Command::Bind      => consts::SOCKS4_CMD_BIND,
-        }
-    }
-
-    #[inline]
-    #[rustfmt::skip]
-    fn from_u8(code: u8) -> Option<Socks4Command> {
-        match code {
-            consts::SOCKS4_CMD_CONNECT      => Some(Socks4Command::Connect),
-            consts::SOCKS4_CMD_BIND         => Some(Socks4Command::Bind),
             _ => None,
         }
     }
@@ -181,6 +152,10 @@ pub enum SocksError {
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
 
+    #[cfg(feature = "socks4")]
+    #[error("Error with reply: {0}.")]
+    ReplySocks4Error(#[from] socks4::ReplyError),
+
     #[error("Argument input error: `{0}`.")]
     ArgumentInputError(&'static str),
 
@@ -212,12 +187,6 @@ pub enum ReplyError {
     CommandNotSupported,
     #[error("Address type not supported")]
     AddressTypeNotSupported,
-
-    #[error("Reject different user ID")]
-    RejectDifferentUserId,
-
-    #[error("Unknown response")]
-    UnknownResponse,
     //    OtherReply(u8),
 }
 
@@ -236,9 +205,6 @@ impl ReplyError {
             ReplyError::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
             ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
 //            ReplyError::OtherReply(c)           => c,
-            // TODO
-            ReplyError::RejectDifferentUserId => 93,
-            ReplyError::UnknownResponse => 100
         }
     }
 
@@ -405,8 +371,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
-            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
-            // binding source address used to communicate with the socks5 server. 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
+            // binding source address used to communicate with the socks5 server.
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();
@@ -448,8 +414,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
-            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
-            // binding source address used to communicate with the socks5 server. 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
+            // binding source address used to communicate with the socks5 server.
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();

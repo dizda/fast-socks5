@@ -1,6 +1,7 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
+use crate::util::stream::{tcp_connect, tcp_connect_with_timeout};
 use crate::{
     consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result,
     Socks5Command, SocksError,
@@ -11,10 +12,8 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::task::Poll;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::timeout;
 
 const MAX_ADDR_LEN: usize = 260;
 
@@ -595,42 +594,13 @@ impl Socks5Stream<TcpStream> {
     where
         T: ToSocketAddrs,
     {
-        let fut = TcpStream::connect(
-            socks_server
-                .to_socket_addrs()?
-                .next()
-                .context("unreachable")?,
-        );
+        let addr = socks_server
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
         let socket = match config.request_timeout {
-            None => fut.await?,
-            Some(request_timeout) => {
-                // TCP connect with timeout, to avoid memory leak for connection that takes forever
-                // Note: code is exactly as the server's `execute_command_connect` code.
-                let limit = Duration::from_secs(request_timeout);
-                match timeout(limit, fut).await {
-                    Ok(e) => match e {
-                        Ok(o) => o,
-                        Err(e) => match e.kind() {
-                            // Match other TCP errors with ReplyError
-                            io::ErrorKind::ConnectionRefused => {
-                                return Err(ReplyError::ConnectionRefused.into())
-                            }
-                            io::ErrorKind::ConnectionAborted => {
-                                return Err(ReplyError::ConnectionNotAllowed.into())
-                            }
-                            io::ErrorKind::ConnectionReset => {
-                                return Err(ReplyError::ConnectionNotAllowed.into())
-                            }
-                            io::ErrorKind::NotConnected => {
-                                return Err(ReplyError::NetworkUnreachable.into())
-                            }
-                            _ => return Err(e.into()), // #[error("General failure")] ?
-                        },
-                    },
-                    // Wrap timeout error in a proper ReplyError
-                    Err(_) => return Err(ReplyError::TtlExpired.into()),
-                }
-            }
+            None => tcp_connect(addr).await?,
+            Some(request_timeout) => tcp_connect_with_timeout(addr, request_timeout).await?,
         };
         info!("Connected @ {}", &socket.peer_addr()?);
 

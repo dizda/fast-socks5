@@ -11,13 +11,17 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::time::timeout;
 
 const MAX_ADDR_LEN: usize = 260;
 
 #[derive(Debug)]
 pub struct Config {
+    /// Timeout of the command request
+    request_timeout: Option<u64>,
     /// Avoid useless roundtrips if we don't need the Authentication layer
     /// make sure to also activate it on the server side.
     skip_auth: bool,
@@ -25,11 +29,17 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { skip_auth: false }
+        Config { request_timeout: None, skip_auth: false }
     }
 }
 
 impl Config {
+    /// How much time it should wait until the request timeout.
+    pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
+        self.request_timeout = Some(n);
+        self
+    }
+
     pub fn set_skip_auth(&mut self, value: bool) -> &mut Self {
         self.skip_auth = value;
         self
@@ -585,13 +595,43 @@ impl Socks5Stream<TcpStream> {
     where
         T: ToSocketAddrs,
     {
-        let socket = TcpStream::connect(
+        let fut = TcpStream::connect(
             socks_server
                 .to_socket_addrs()?
                 .next()
                 .context("unreachable")?,
-        )
-        .await?;
+        );
+        let socket = match config.request_timeout {
+            None => fut.await?,
+            Some(request_timeout) => {
+                // TCP connect with timeout, to avoid memory leak for connection that takes forever
+                // Note: code is exactly as the server's `execute_command_connect` code.
+                let limit = Duration::from_secs(request_timeout);
+                match timeout(limit, fut).await {
+                    Ok(e) => match e {
+                        Ok(o) => o,
+                        Err(e) => match e.kind() {
+                            // Match other TCP errors with ReplyError
+                            io::ErrorKind::ConnectionRefused => {
+                                return Err(ReplyError::ConnectionRefused.into())
+                            }
+                            io::ErrorKind::ConnectionAborted => {
+                                return Err(ReplyError::ConnectionNotAllowed.into())
+                            }
+                            io::ErrorKind::ConnectionReset => {
+                                return Err(ReplyError::ConnectionNotAllowed.into())
+                            }
+                            io::ErrorKind::NotConnected => {
+                                return Err(ReplyError::NetworkUnreachable.into())
+                            }
+                            _ => return Err(e.into()), // #[error("General failure")] ?
+                        },
+                    },
+                    // Wrap timeout error in a proper ReplyError
+                    Err(_) => return Err(ReplyError::TtlExpired.into()),
+                }
+            }
+        };
         info!("Connected @ {}", &socket.peer_addr()?);
 
         // Specify the target, here domain name, dns will be resolved on the server side

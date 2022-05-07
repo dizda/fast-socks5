@@ -521,15 +521,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Execute the socks5 command that the client wants.
     async fn execute_command(&mut self) -> Result<()> {
         match &self.cmd {
-            None => return Err(ReplyError::CommandNotSupported.into()),
+            None => Err(ReplyError::CommandNotSupported.into()),
             Some(cmd) => match cmd {
-                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
+                Socks5Command::TCPBind => Err(ReplyError::CommandNotSupported.into()),
                 Socks5Command::TCPConnect => return self.execute_command_connect().await,
                 Socks5Command::UDPAssociate => {
                     if self.config.allow_udp {
                         return self.execute_command_udp_assoc().await;
                     } else {
-                        return Err(ReplyError::CommandNotSupported.into());
+                        Err(ReplyError::CommandNotSupported.into())
                     }
                 }
             },
@@ -772,7 +772,7 @@ fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
     reply.append(&mut ip_oct);
     reply.append(&mut port);
 
-    return reply;
+    reply
 }
 
 #[cfg(test)]

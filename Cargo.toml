@@ -9,6 +9,10 @@ repository = "https://github.com/dizda/fast-socks5"
 categories = ["asynchronous", "network-programming", "command-line-utilities" ,"authentication" ]
 keywords = ["io", "proxy", "vpn", "async", "socks"]
 
+[features]
+default = []
+socks4 = []
+
 [dependencies]
 log = "0.4"
 tokio = { version = "1.17.0", features = ["io-util", "net", "time"] }

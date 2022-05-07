@@ -18,10 +18,10 @@ use tokio::{
 /// # How to use it:
 ///
 /// Listen on a local address, authentication-free:
-///     `$ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 no-auth`
+///     `$ RUST_LOG=debug cargo run --example simple_tcp_server -- --listen-addr 127.0.0.1:1337 no-auth`
 ///
 /// Listen on a local address, with basic username/password requirement:
-///     `$ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 password --username admin --password password`
+///     `$ RUST_LOG=debug cargo run --example simple_tcp_server -- --listen-addr 127.0.0.1:1337 password --username admin --password password`
 ///
 #[derive(Debug, StructOpt)]
 #[structopt(

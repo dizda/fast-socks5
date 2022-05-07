@@ -1,3 +1,5 @@
+pub mod client;
+
 use thiserror::Error;
 
 #[rustfmt::skip]

@@ -7,8 +7,6 @@ pub mod server;
 pub mod util;
 
 #[cfg(feature = "socks4")]
-pub mod client4;
-#[cfg(feature = "socks4")]
 pub mod socks4;
 
 use anyhow::Context;
@@ -154,7 +152,7 @@ pub enum SocksError {
 
     #[cfg(feature = "socks4")]
     #[error("Error with reply: {0}.")]
-    ReplySocks4Error(#[from] socks4::ReplyError),
+    ReplySocks4Error(#[from] socks3::ReplyError),
 
     #[error("Argument input error: `{0}`.")]
     ArgumentInputError(&'static str),
@@ -423,7 +421,7 @@ mod test {
             #[rustfmt::skip]
             tunnel.send_to(
                 &decode_hex(&(
-                    "AAAA".to_owned()   // ID 
+                    "AAAA".to_owned()   // ID
                     + "0100"            // Query parameters
                     + "0001"            // Number of questions
                     + "0000"            // Number of answers

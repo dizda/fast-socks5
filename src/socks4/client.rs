@@ -1,6 +1,6 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
-use crate::socks3::{consts, ReplyError, Socks4Command};
+use crate::socks4::{consts, ReplyError, Socks4Command};
 use crate::util::target_addr::{TargetAddr, ToTargetAddr};
 use crate::{Result, SocksError, SocksError::ReplySocks4Error};
 use anyhow::Context;

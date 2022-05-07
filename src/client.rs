@@ -19,8 +19,8 @@ const MAX_ADDR_LEN: usize = 260;
 
 #[derive(Debug)]
 pub struct Config {
-    /// Timeout of the command request
-    request_timeout: Option<u64>,
+    /// Timeout of the socket connect
+    connect_timeout: Option<u64>,
     /// Avoid useless roundtrips if we don't need the Authentication layer
     /// make sure to also activate it on the server side.
     skip_auth: bool,
@@ -28,14 +28,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { request_timeout: None, skip_auth: false }
+        Config { connect_timeout: None, skip_auth: false }
     }
 }
 
 impl Config {
-    /// How much time it should wait until the request timeout.
-    pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
-        self.request_timeout = Some(n);
+    /// How much time it should wait until the socket connect times out.
+    pub fn set_connect_timeout(&mut self, n: u64) -> &mut Self {
+        self.connect_timeout = Some(n);
         self
     }
 
@@ -598,9 +598,9 @@ impl Socks5Stream<TcpStream> {
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;
-        let socket = match config.request_timeout {
+        let socket = match config.connect_timeout {
             None => tcp_connect(addr).await?,
-            Some(request_timeout) => tcp_connect_with_timeout(addr, request_timeout).await?,
+            Some(connect_timeout) => tcp_connect_with_timeout(addr, connect_timeout).await?,
         };
         info!("Connected @ {}", &socket.peer_addr()?);
 

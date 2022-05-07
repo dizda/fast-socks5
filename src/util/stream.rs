@@ -51,7 +51,7 @@ pub async fn tcp_connect_with_timeout<T>(addr: T, request_timeout_s: u64) -> Res
     let fut = tcp_connect(addr);
     match timeout(Duration::from_secs(request_timeout_s), fut).await {
         Ok(result) => result,
-        Err(_) => Err(ReplyError::TtlExpired.into()),
+        Err(_) => Err(ReplyError::ConnectionTimeout.into()),
     }
 }
 

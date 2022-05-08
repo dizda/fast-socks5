@@ -552,6 +552,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Connect to the target address that the client wants,
     /// then forward the data between them (client <=> target address).
     async fn execute_command_connect(&mut self) -> Result<()> {
+        if !self.config.transfer_data {
+            self.inner
+                .write(&new_reply(
+                    &ReplyError::Succeeded,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+                ))
+                .await
+                .context("Can't write successful reply")?;
+
+            self.inner.flush().await.context("Can't flush the reply!")?;
+
+            debug!("Wrote success");
+
+            return Ok(());
+        }
+
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
         let addr = self
@@ -604,10 +620,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Wrote success");
 
-        if self.config.transfer_data {
-            transfer(&mut self.inner, outbound).await?;
-            debug!("Transfer success");
-        }
+        transfer(&mut self.inner, outbound).await?;
 
         Ok(())
     }
@@ -615,6 +628,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
     /// Bind to a random UDP port, wait for the traffic from
     /// the client, and then forward the data to the remote addr.
     async fn execute_command_udp_assoc(&mut self) -> Result<()> {
+        if !self.config.transfer_data {
+            // UDP non-data transfers aren't supported (yet)
+            return Err(ReplyError::ConnectionNotAllowed.into())
+        }
+
         // The DST.ADDR and DST.PORT fields contain the address and port that
         // the client expects to use to send UDP datagrams on for the
         // association. The server MAY use this information to limit access
@@ -642,10 +660,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Wrote success");
 
-        if self.config.transfer_data {
-            transfer_udp(peer_sock).await?;
-            debug!("Transfer success");
-        }
+        transfer_udp(peer_sock).await?;
 
         Ok(())
     }

@@ -32,6 +32,10 @@ pub struct Config {
     dns_resolve: bool,
     /// Enable command execution
     execute_command: bool,
+    /// Enable data transfer as part of command execution,
+    /// in case you want to stream to another proxy you'll
+    /// want to disable this
+    transfer_data: bool,
     /// Enable UDP support
     allow_udp: bool,
     auth: Option<Arc<dyn Authentication>>,
@@ -44,6 +48,7 @@ impl Default for Config {
             skip_auth: false,
             dns_resolve: true,
             execute_command: true,
+            transfer_data: true,
             allow_udp: false,
             auth: None,
         }
@@ -95,6 +100,14 @@ impl Config {
     /// Set whether or not to execute commands
     pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
         self.execute_command = value;
+        self
+    }
+
+    /// Set whether or not to transfer data as part of command execution,
+    /// in case you want to stream to another proxy you'll
+    /// want to disable this
+    pub fn set_transfer_data(&mut self, value: bool) -> &mut Self {
+        self.transfer_data = value;
         self
     }
 
@@ -591,7 +604,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Wrote success");
 
-        transfer(&mut self.inner, outbound).await
+        if self.config.transfer_data {
+            transfer(&mut self.inner, outbound).await?;
+            debug!("Transfer success");
+        }
+
+        Ok(())
     }
 
     /// Bind to a random UDP port, wait for the traffic from
@@ -624,7 +642,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Wrote success");
 
-        transfer_udp(peer_sock).await?;
+        if self.config.transfer_data {
+            transfer_udp(peer_sock).await?;
+            debug!("Transfer success");
+        }
 
         Ok(())
     }

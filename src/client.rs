@@ -401,14 +401,14 @@ pub struct Socks5Datagram<S: AsyncRead + AsyncWrite + Unpin> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// Creates a UDP socket bound to the specified address which will have its
     /// traffic routed through the specified proxy.
-    /// 
+    ///
     /// # Arguments
     /// * `backing_socket` - The underlying socket carrying the socks5 traffic.
-    /// * `client_bind_addr` - A socket address indicates the binding source address used to 
+    /// * `client_bind_addr` - A socket address indicates the binding source address used to
     /// communicate with the socks5 server.
-    /// 
+    ///
     /// # Examples
-    /// ```ignore 
+    /// ```ignore
     /// let backing_socket = TcpStream::connect("127.0.0.1:1080").await.unwrap();
     /// let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
     ///     .await

@@ -75,6 +75,10 @@ impl TargetAddr {
         }
     }
 
+    pub fn is_domain(&self) -> bool {
+        !self.is_ip()
+    }
+
     pub fn to_be_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut buf = vec![];
         match self {

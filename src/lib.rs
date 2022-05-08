@@ -6,6 +6,9 @@ pub mod client;
 pub mod server;
 pub mod util;
 
+#[cfg(feature = "socks4")]
+pub mod socks4;
+
 use anyhow::Context;
 use std::fmt;
 use std::io;
@@ -146,6 +149,10 @@ pub enum SocksError {
 
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
+
+    #[cfg(feature = "socks4")]
+    #[error("Error with reply: {0}.")]
+    ReplySocks4Error(#[from] socks4::ReplyError),
 
     #[error("Argument input error: `{0}`.")]
     ArgumentInputError(&'static str),
@@ -365,8 +372,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
-            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
-            // binding source address used to communicate with the socks5 server. 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
+            // binding source address used to communicate with the socks5 server.
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();
@@ -408,8 +415,8 @@ mod test {
             tokio::spawn(setup_socks_server("[::1]:0", None, tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
-            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the 
-            // binding source address used to communicate with the socks5 server. 
+            // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
+            // binding source address used to communicate with the socks5 server.
             let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
                 .await
                 .unwrap();
@@ -417,7 +424,7 @@ mod test {
             #[rustfmt::skip]
             tunnel.send_to(
                 &decode_hex(&(
-                    "AAAA".to_owned()   // ID 
+                    "AAAA".to_owned()   // ID
                     + "0100"            // Query parameters
                     + "0001"            // Number of questions
                     + "0000"            // Number of answers

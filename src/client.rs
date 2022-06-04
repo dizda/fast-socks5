@@ -1,4 +1,3 @@
-#[forbid(unsafe_code)]
 use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::{

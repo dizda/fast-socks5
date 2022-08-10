@@ -15,7 +15,7 @@ socks4 = []
 
 [dependencies]
 log = "0.4"
-tokio = { version = "1.17.0", features = ["io-util", "net", "time"] }
+tokio = { version = "1.17.0", features = ["io-util", "net", "time", "macros"] }
 anyhow = "1.0"
 thiserror = "1.0"
 tokio-stream = "0.1.8"

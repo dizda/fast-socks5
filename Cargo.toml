@@ -1,6 +1,6 @@
 [package]
 name = "fast-socks5"
-version = "0.8.0"
+version = "0.8.1"
 authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -15,16 +15,16 @@ socks4 = []
 
 [dependencies]
 log = "0.4"
-tokio = { version = "1.17.0", features = ["io-util", "net", "time", "macros"] }
+tokio = { version = "1.20.1", features = ["io-util", "net", "time", "macros"] }
 anyhow = "1.0"
 thiserror = "1.0"
-tokio-stream = "0.1.8"
+tokio-stream = "0.1.9"
 
 # Dependencies for examples and tests
 [dev-dependencies]
-env_logger = "0.7"
+env_logger = "0.9"
 structopt = "0.3"
-tokio = { version = "1.17.0", features = ["io-util", "net", "time", "rt-multi-thread", "macros"] }
+tokio = { version = "1.20.1", features = ["io-util", "net", "time", "rt-multi-thread", "macros"] }
 tokio-test = "0.4.2"
 
 [[example]]

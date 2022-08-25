@@ -3,6 +3,7 @@ use crate::parse_udp_request;
 use crate::read_exact;
 use crate::ready;
 use crate::util::target_addr::{read_address, TargetAddr};
+use crate::util::stream::tcp_connect_with_timeout;
 use crate::Socks5Command;
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
@@ -14,11 +15,9 @@ use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
-use tokio::time::timeout;
 use tokio::try_join;
 use tokio_stream::Stream;
 
@@ -549,33 +548,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .next()
             .context("unreachable")?;
 
-        let fut = TcpStream::connect(addr);
-        let limit = Duration::from_secs(self.config.request_timeout);
-
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        let outbound = match timeout(limit, fut).await {
-            Ok(e) => match e {
-                Ok(o) => o,
-                Err(e) => match e.kind() {
-                    // Match other TCP errors with ReplyError
-                    io::ErrorKind::ConnectionRefused => {
-                        return Err(ReplyError::ConnectionRefused.into())
-                    }
-                    io::ErrorKind::ConnectionAborted => {
-                        return Err(ReplyError::ConnectionNotAllowed.into())
-                    }
-                    io::ErrorKind::ConnectionReset => {
-                        return Err(ReplyError::ConnectionNotAllowed.into())
-                    }
-                    io::ErrorKind::NotConnected => {
-                        return Err(ReplyError::NetworkUnreachable.into())
-                    }
-                    _ => return Err(e.into()), // #[error("General failure")] ?
-                },
-            },
-            // Wrap timeout error in a proper ReplyError
-            Err(_) => return Err(ReplyError::TtlExpired.into()),
-        };
+        let outbound = tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
 
         debug!("Connected to remote destination");
 

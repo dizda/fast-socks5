@@ -1,6 +1,7 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
+use crate::util::stream::{tcp_connect, tcp_connect_with_timeout};
 use crate::{
     consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result,
     Socks5Command, SocksError,
@@ -18,6 +19,8 @@ const MAX_ADDR_LEN: usize = 260;
 
 #[derive(Debug)]
 pub struct Config {
+    /// Timeout of the socket connect
+    connect_timeout: Option<u64>,
     /// Avoid useless roundtrips if we don't need the Authentication layer
     /// make sure to also activate it on the server side.
     skip_auth: bool,
@@ -25,11 +28,17 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { skip_auth: false }
+        Config { connect_timeout: None, skip_auth: false }
     }
 }
 
 impl Config {
+    /// How much time it should wait until the socket connect times out.
+    pub fn set_connect_timeout(&mut self, n: u64) -> &mut Self {
+        self.connect_timeout = Some(n);
+        self
+    }
+
     pub fn set_skip_auth(&mut self, value: bool) -> &mut Self {
         self.skip_auth = value;
         self
@@ -585,13 +594,14 @@ impl Socks5Stream<TcpStream> {
     where
         T: ToSocketAddrs,
     {
-        let socket = TcpStream::connect(
-            socks_server
-                .to_socket_addrs()?
-                .next()
-                .context("unreachable")?,
-        )
-        .await?;
+        let addr = socks_server
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+        let socket = match config.connect_timeout {
+            None => tcp_connect(addr).await?,
+            Some(connect_timeout) => tcp_connect_with_timeout(addr, connect_timeout).await?,
+        };
         info!("Connected @ {}", &socket.peer_addr()?);
 
         // Specify the target, here domain name, dns will be resolved on the server side

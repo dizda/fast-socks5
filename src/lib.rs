@@ -179,6 +179,8 @@ pub enum ReplyError {
     HostUnreachable,
     #[error("Connection refused")]
     ConnectionRefused,
+    #[error("Connection timeout")]
+    ConnectionTimeout,
     #[error("TTL expired")]
     TtlExpired,
     #[error("Command not supported")]
@@ -199,6 +201,7 @@ impl ReplyError {
             ReplyError::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
             ReplyError::HostUnreachable         => consts::SOCKS5_REPLY_HOST_UNREACHABLE,
             ReplyError::ConnectionRefused       => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
+            ReplyError::ConnectionTimeout       => consts::SOCKS5_REPLY_TTL_EXPIRED,
             ReplyError::TtlExpired              => consts::SOCKS5_REPLY_TTL_EXPIRED,
             ReplyError::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
             ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,

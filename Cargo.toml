@@ -2,7 +2,7 @@
 name = "fast-socks5"
 version = "0.8.1"
 authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 description = "Fast SOCKS5 client/server implementation written in Rust async/.await (tokio)"
 repository = "https://github.com/dizda/fast-socks5"

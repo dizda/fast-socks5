@@ -1,4 +1,3 @@
-#[forbid(unsafe_code)]
 use crate::read_exact;
 use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::util::stream::{tcp_connect, tcp_connect_with_timeout};

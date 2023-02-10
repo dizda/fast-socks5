@@ -17,6 +17,7 @@ use util::target_addr::read_address;
 use util::target_addr::TargetAddr;
 use util::target_addr::ToTargetAddr;
 
+use crate::util::target_addr::AddrError;
 use tokio::io::AsyncReadExt;
 
 #[rustfmt::skip]
@@ -150,6 +151,9 @@ pub enum SocksError {
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
 
+    #[error("AddrError: {0}.")]
+    AddrError(#[from] AddrError),
+
     #[cfg(feature = "socks4")]
     #[error("Error with reply: {0}.")]
     ReplySocks4Error(#[from] socks4::ReplyError),
@@ -224,6 +228,22 @@ impl ReplyError {
             consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED => ReplyError::AddressTypeNotSupported,
 //            _                                               => ReplyError::OtherReply(code),
             _                                               => unreachable!("ReplyError code unsupported."),
+        }
+    }
+}
+
+impl From<&AddrError> for ReplyError {
+    fn from(value: &AddrError) -> Self {
+        match value {
+            AddrError::DNSResolutionFailed => Self::HostUnreachable,
+            AddrError::IPv4Unreadable => Self::AddressTypeNotSupported,
+            AddrError::IPv6Unreadable => Self::AddressTypeNotSupported,
+            AddrError::PortNumberUnreadable => Self::AddressTypeNotSupported,
+            AddrError::DomainLenUnreadable => Self::AddressTypeNotSupported,
+            AddrError::DomainContentUnreadable => Self::AddressTypeNotSupported,
+            AddrError::ExceededMaxDomainLen(_) => Self::AddressTypeNotSupported,
+            AddrError::Utf8 => Self::AddressTypeNotSupported,
+            AddrError::IncorrectAddressType => Self::AddressTypeNotSupported,
         }
     }
 }

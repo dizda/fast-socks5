@@ -1,6 +1,6 @@
 use crate::read_exact;
-use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::util::stream::{tcp_connect, tcp_connect_with_timeout};
+use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::{
     consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result,
     Socks5Command, SocksError,
@@ -27,7 +27,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { connect_timeout: None, skip_auth: false }
+        Config {
+            connect_timeout: None,
+            skip_auth: false,
+        }
     }
 }
 
@@ -94,14 +97,14 @@ where
         cmd: Socks5Command,
         target_addr: TargetAddr,
     ) -> Result<TargetAddr> {
-        self.target_addr = Some(target_addr);
+        self.target_addr = Some(target_addr.clone()); // TODO: v3 change this!
 
         // Request Lifecycle
         info!("Requesting headers `{:?}`...", &self.target_addr);
         self.request_header(cmd).await?;
-        let bind_addr = self.read_request_reply().await?;
+        // let bind_addr = self.read_request_reply().await?; // TODO: v3 change this!
 
-        Ok(bind_addr)
+        Ok(target_addr) // TODO: v3 change this!
     }
 
     /// Decide to whether or not, accept the authentication method
@@ -209,7 +212,7 @@ where
             }) => Ok((username, password)),
             None => Err(SocksError::AuthenticationRejected(format!(
                 "Authentication rejected, missing user pass"
-            )))
+            ))),
         }?;
 
         let user_bytes = username.as_bytes();
@@ -341,10 +344,10 @@ where
             .await
             .context("Can't write request header's packet.")?;
 
-        self.socket
-            .flush()
-            .await
-            .context("Can't flush request header's packet")?;
+        // self.socket // v3: without flush
+        //     .flush()
+        //     .await
+        //     .context("Can't flush request header's packet")?;
 
         Ok(())
     }

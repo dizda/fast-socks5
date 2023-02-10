@@ -2,8 +2,8 @@ use crate::new_udp_header;
 use crate::parse_udp_request;
 use crate::read_exact;
 use crate::ready;
-use crate::util::target_addr::{read_address, TargetAddr};
 use crate::util::stream::tcp_connect_with_timeout;
+use crate::util::target_addr::{read_address, TargetAddr};
 use crate::Socks5Command;
 use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
@@ -240,6 +240,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             Err(SocksError::ReplyError(e)) => {
                 // If a reply error has been returned, we send it to the client
                 self.reply_error(&e).await?;
+                return Err(e.into()); // propagate the error to end this connection's task
+            }
+            Err(SocksError::AddrError(e)) => {
+                // If a reply error has been returned, we send it to the client
+                self.reply_error(&(&e).into()).await?;
                 return Err(e.into()); // propagate the error to end this connection's task
             }
             // if any other errors has been detected, we simply end connection's task
@@ -553,15 +558,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
 
         debug!("Connected to remote destination");
 
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        self.inner.flush().await.context("Can't flush the reply!")?;
+        // self.inner
+        //     .write(&new_reply(
+        //         &ReplyError::Succeeded,
+        //         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+        //     ))
+        //     .await
+        //     .context("Can't write successful reply")?;
+        //
+        // self.inner.flush().await.context("Can't flush the reply!")?;
 
         debug!("Wrote success");
 

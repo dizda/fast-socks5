@@ -3,7 +3,7 @@
 extern crate log;
 
 use fast_socks5::{
-    server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
+    server::{Authentication, Config, SimpleUserPassword, Socks5Server, Socks5Socket},
     Result, SocksError,
 };
 use std::future::Future;
@@ -76,8 +76,11 @@ async fn spawn_socks_server() -> Result<()> {
     config.set_request_timeout(opt.request_timeout);
     config.set_skip_auth(opt.skip_auth);
 
-    match opt.auth {
-        AuthMode::NoAuth => warn!("No authentication has been set!"),
+    let config = match opt.auth {
+        AuthMode::NoAuth => {
+            warn!("No authentication has been set!");
+            config
+        }
         AuthMode::Password { username, password } => {
             if opt.skip_auth {
                 return Err(SocksError::ArgumentInputError(
@@ -85,13 +88,13 @@ async fn spawn_socks_server() -> Result<()> {
                 ));
             }
 
-            config.set_authentication(SimpleUserPassword { username, password });
             info!("Simple auth system has been set.");
+            config.with_authentication(SimpleUserPassword { username, password })
         }
-    }
+    };
 
-    let mut listener = Socks5Server::bind(&opt.listen_addr).await?;
-    listener.set_config(config);
+    let listener = <Socks5Server>::bind(&opt.listen_addr).await?;
+    let listener = listener.with_config(config);
 
     let mut incoming = listener.incoming();
 
@@ -112,10 +115,11 @@ async fn spawn_socks_server() -> Result<()> {
     Ok(())
 }
 
-fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
+fn spawn_and_log_error<F, T, A>(fut: F) -> task::JoinHandle<()>
 where
-    F: Future<Output = Result<Socks5Socket<T>>> + Send + 'static,
+    F: Future<Output = Result<Socks5Socket<T, A>>> + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin,
+    A: Authentication,
 {
     task::spawn(async move {
         if let Err(e) = fut.await {

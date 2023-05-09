@@ -3,7 +3,7 @@
 extern crate log;
 
 use fast_socks5::{
-    server::{Config, SimpleUserPassword, Socks5Socket},
+    server::{Authentication, Config, SimpleUserPassword, Socks5Socket},
     Result,
 };
 use std::future::Future;
@@ -76,13 +76,16 @@ async fn spawn_socks_server() -> Result<()> {
     let mut config = Config::default();
     config.set_request_timeout(opt.request_timeout);
 
-    match opt.auth {
-        AuthMode::NoAuth => warn!("No authentication has been set!"),
-        AuthMode::Password { username, password } => {
-            config.set_authentication(SimpleUserPassword { username, password });
-            info!("Simple auth system has been set.");
+    let config = match opt.auth {
+        AuthMode::NoAuth => {
+            warn!("No authentication has been set!");
+            config
         }
-    }
+        AuthMode::Password { username, password } => {
+            info!("Simple auth system has been set.");
+            config.with_authentication(SimpleUserPassword { username, password })
+        }
+    };
 
     let config = Arc::new(config);
 
@@ -105,10 +108,11 @@ async fn spawn_socks_server() -> Result<()> {
     }
 }
 
-fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
+fn spawn_and_log_error<F, T, A>(fut: F) -> task::JoinHandle<()>
 where
-    F: Future<Output = Result<Socks5Socket<T>>> + Send + 'static,
+    F: Future<Output = Result<Socks5Socket<T, A>>> + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin,
+    A: Authentication,
 {
     task::spawn(async move {
         if let Err(e) = fut.await {

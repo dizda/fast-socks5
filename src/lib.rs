@@ -312,12 +312,10 @@ mod test {
     ) -> Result<()> {
         let mut config = server::Config::default();
         config.set_udp_support(true);
-        match auth {
-            None => {}
-            Some(up) => {
-                config.set_authentication(up);
-            }
-        }
+        let config = match auth {
+            None => config,
+            Some(up) => config.with_authentication(up),
+        };
 
         let config = Arc::new(config);
         let listener = TcpListener::bind(proxy_addr).await?;

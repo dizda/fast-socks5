@@ -122,6 +122,10 @@ impl<A: Authentication> Config<A> {
         }
     }
 
+    pub fn get_authentication(&self) -> Option<Arc<A>> {
+        self.auth.as_ref().map(|a| a.clone())
+    }
+
     /// Set whether or not to execute commands
     pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
         self.execute_command = value;

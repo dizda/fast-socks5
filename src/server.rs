@@ -69,25 +69,32 @@ pub struct SimpleUserPassword {
     pub password: String,
 }
 
+/// The struct returned when the user has successfully authenticated
+pub struct AuthSucceeded {
+    pub username: String,
+}
+
 /// This is an example to auth via simple credentials.
 /// If the auth succeed, we return the username authenticated with, for further uses.
 #[async_trait::async_trait]
 impl Authentication for SimpleUserPassword {
-    type Item = String;
+    type Item = AuthSucceeded;
 
     async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item> {
         if let Some((username, password)) = credentials {
             // Client has supplied credentials
             if username == self.username && password == self.password {
-                Some(self.username.to_owned())
+                // Some() will allow the authentication and the credentials
+                // will be forwarded to the socket
+                Some(AuthSucceeded { username })
             } else {
+                // Credentials incorrect, we deny the auth
                 None
             }
         } else {
             // The client hasn't supplied any credentials, which only happens
-            // when `Authentication::allow_no_auth()` is set as `true`
+            // when `Config::allow_no_auth()` is set as `true`
             None
-            //TODO: put an example of if CLIENT_ADDR == 127.0.0.1 { SOME } ELSE { NONE }
         }
     }
 }
@@ -383,7 +390,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<u8> {
         let method_supported;
 
-        if let Some(auth) = self.config.auth.as_ref() {
+        if let Some(_auth) = self.config.auth.as_ref() {
             if client_methods.contains(&consts::SOCKS5_AUTH_METHOD_PASSWORD) {
                 // can auth with password
                 method_supported = consts::SOCKS5_AUTH_METHOD_PASSWORD;

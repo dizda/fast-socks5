@@ -3,7 +3,7 @@
 extern crate log;
 
 use fast_socks5::{
-    server::{Authentication, Config, SimpleUserPassword, Socks5Server, Socks5Socket},
+    server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
     Result, SocksError,
 };
 use std::future::Future;
@@ -115,15 +115,20 @@ async fn spawn_socks_server() -> Result<()> {
     Ok(())
 }
 
-fn spawn_and_log_error<F, T, A>(fut: F) -> task::JoinHandle<()>
+fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
 where
-    F: Future<Output = Result<Socks5Socket<T, A>>> + Send + 'static,
+    F: Future<Output = Result<Socks5Socket<T, SimpleUserPassword>>> + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin,
-    A: Authentication,
 {
     task::spawn(async move {
-        if let Err(e) = fut.await {
-            error!("{:#}", &e);
+        match fut.await {
+            Ok(mut socket) => {
+                // the user is validated by the trait, so it can't be null
+                let user = socket.take_credentials().unwrap();
+
+                info!("user logged in with `{}`", user.username);
+            }
+            Err(err) => error!("{:#}", &err),
         }
     })
 }

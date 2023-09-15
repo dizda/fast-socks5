@@ -326,6 +326,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         Ok(self)
     }
 
+    /// Consumes the `Socks5Socket`, returning the wrapped stream.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
     /// Read the authentication method provided by the client.
     /// A client send a list of methods that he supports, he could send
     ///

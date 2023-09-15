@@ -18,6 +18,7 @@
   - No-Auth method
   - Username/Password auth method
   - Custom auth methods can be implemented via the Authentication Trait
+  - Credentials returned on authentication success
 - All SOCKS5 RFC errors (replies) should be mapped
 - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
 - `IPv4`, `IPv6`, and `Domains` types are supported

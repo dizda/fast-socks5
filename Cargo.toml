@@ -19,6 +19,7 @@ tokio = { version = "1.25.0", features = ["io-util", "net", "time", "macros"] }
 anyhow = "1.0"
 thiserror = "1.0"
 tokio-stream = "0.1.9"
+async-trait = "0.1.68"
 
 # Dependencies for examples and tests
 [dev-dependencies]

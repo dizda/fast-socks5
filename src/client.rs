@@ -1,6 +1,6 @@
 use crate::read_exact;
-use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::util::stream::{tcp_connect, tcp_connect_with_timeout};
+use crate::util::target_addr::{read_address, TargetAddr, ToTargetAddr};
 use crate::{
     consts, new_udp_header, parse_udp_request, AuthenticationMethod, ReplyError, Result,
     Socks5Command, SocksError,
@@ -27,7 +27,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { connect_timeout: None, skip_auth: false }
+        Config {
+            connect_timeout: None,
+            skip_auth: false,
+        }
     }
 }
 
@@ -185,7 +188,7 @@ where
             _ => {
                 debug!("Don't support this auth method, reply with (0xff)");
                 self.socket
-                    .write(&[
+                    .write_all(&[
                         consts::SOCKS5_VERSION,
                         consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
                     ])
@@ -209,7 +212,7 @@ where
             }) => Ok((username, password)),
             None => Err(SocksError::AuthenticationRejected(format!(
                 "Authentication rejected, missing user pass"
-            )))
+            ))),
         }?;
 
         let user_bytes = username.as_bytes();

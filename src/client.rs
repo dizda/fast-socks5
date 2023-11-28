@@ -128,23 +128,21 @@ where
         methods: Vec<AuthenticationMethod>,
     ) -> Result<Vec<AuthenticationMethod>> {
         debug!(
-            "Send version and method len [{}, {}]",
+            "Client's version and method len [{}, {}]",
             consts::SOCKS5_VERSION,
             methods.len()
         );
-        // write the first 2 bytes which contains the SOCKS version and the methods len()
-        self.socket
-            .write(&[consts::SOCKS5_VERSION, methods.len() as u8])
-            .await
-            .context("Couldn't write SOCKS version & methods len")?;
+        // the first 2 bytes which contains the SOCKS version and the methods len()
+        let mut request = vec![consts::SOCKS5_VERSION, methods.len() as u8];
 
         let auth = methods.iter().map(|l| l.as_u8()).collect::<Vec<_>>();
-
         debug!("client auth methods supported: {:?}", &auth);
+        request.extend(auth);
+
         self.socket
-            .write(&auth)
+            .write(&request)
             .await
-            .context("Couldn't write supported auth methods")?;
+            .context("Couldn't write SOCKS version & methods len & supported auth methods")?;
 
         // Return methods available
         Ok(methods)

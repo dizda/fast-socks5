@@ -718,6 +718,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         &self.auth
     }
 
+    pub fn cmd(&self) -> &Option<Socks5Command> {
+        &self.cmd
+    }
+
     /// Borrow the credentials of the user has authenticated with
     pub fn get_credentials(&self) -> Option<&<<A as Authentication>::Item as Deref>::Target>
     where

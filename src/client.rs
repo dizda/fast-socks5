@@ -216,23 +216,13 @@ where
         let user_bytes = username.as_bytes();
         let pass_bytes = password.as_bytes();
 
-        // send username len
-        self.socket
-            .write(&[1, user_bytes.len() as u8])
-            .await
-            .context("Can't send username len")?;
-        self.socket
-            .write(user_bytes)
-            .await
-            .context("Can't send username")?;
+        let mut message: Vec<u8> = vec![1, user_bytes.len() as u8];
+        message.extend(user_bytes);
+        message.push(pass_bytes.len() as u8);
+        message.extend(pass_bytes);
 
-        // send password len
         self.socket
-            .write(&[pass_bytes.len() as u8])
-            .await
-            .context("Can't send password len")?;
-        self.socket
-            .write(pass_bytes)
+            .write(&message)
             .await
             .context("Can't send password")?;
 

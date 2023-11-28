@@ -133,14 +133,14 @@ where
             methods.len()
         );
         // the first 2 bytes which contains the SOCKS version and the methods len()
-        let mut request = vec![consts::SOCKS5_VERSION, methods.len() as u8];
+        let mut packet = vec![consts::SOCKS5_VERSION, methods.len() as u8];
 
         let auth = methods.iter().map(|l| l.as_u8()).collect::<Vec<_>>();
         debug!("client auth methods supported: {:?}", &auth);
-        request.extend(auth);
+        packet.extend(auth);
 
         self.socket
-            .write(&request)
+            .write(&packet)
             .await
             .context("Couldn't write SOCKS version & methods len & supported auth methods")?;
 
@@ -216,13 +216,13 @@ where
         let user_bytes = username.as_bytes();
         let pass_bytes = password.as_bytes();
 
-        let mut message: Vec<u8> = vec![1, user_bytes.len() as u8];
-        message.extend(user_bytes);
-        message.push(pass_bytes.len() as u8);
-        message.extend(pass_bytes);
+        let mut packet: Vec<u8> = vec![1, user_bytes.len() as u8];
+        packet.extend(user_bytes);
+        packet.push(pass_bytes.len() as u8);
+        packet.extend(pass_bytes);
 
         self.socket
-            .write(&message)
+            .write(&packet)
             .await
             .context("Can't send password")?;
 

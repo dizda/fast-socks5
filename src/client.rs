@@ -140,7 +140,7 @@ where
         packet.extend(auth);
 
         self.socket
-            .write(&packet)
+            .write_all(&packet)
             .await
             .context("Couldn't write SOCKS version & methods len & supported auth methods")?;
 
@@ -222,7 +222,7 @@ where
         packet.extend(pass_bytes);
 
         self.socket
-            .write(&packet)
+            .write_all(&packet)
             .await
             .context("Can't send password")?;
 

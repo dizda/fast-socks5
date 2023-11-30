@@ -128,23 +128,21 @@ where
         methods: Vec<AuthenticationMethod>,
     ) -> Result<Vec<AuthenticationMethod>> {
         debug!(
-            "Send version and method len [{}, {}]",
+            "Client's version and method len [{}, {}]",
             consts::SOCKS5_VERSION,
             methods.len()
         );
-        // write the first 2 bytes which contains the SOCKS version and the methods len()
-        self.socket
-            .write(&[consts::SOCKS5_VERSION, methods.len() as u8])
-            .await
-            .context("Couldn't write SOCKS version & methods len")?;
+        // the first 2 bytes which contains the SOCKS version and the methods len()
+        let mut packet = vec![consts::SOCKS5_VERSION, methods.len() as u8];
 
         let auth = methods.iter().map(|l| l.as_u8()).collect::<Vec<_>>();
-
         debug!("client auth methods supported: {:?}", &auth);
+        packet.extend(auth);
+
         self.socket
-            .write(&auth)
+            .write_all(&packet)
             .await
-            .context("Couldn't write supported auth methods")?;
+            .context("Couldn't write SOCKS version & methods len & supported auth methods")?;
 
         // Return methods available
         Ok(methods)
@@ -218,23 +216,13 @@ where
         let user_bytes = username.as_bytes();
         let pass_bytes = password.as_bytes();
 
-        // send username len
-        self.socket
-            .write(&[1, user_bytes.len() as u8])
-            .await
-            .context("Can't send username len")?;
-        self.socket
-            .write(user_bytes)
-            .await
-            .context("Can't send username")?;
+        let mut packet: Vec<u8> = vec![1, user_bytes.len() as u8];
+        packet.extend(user_bytes);
+        packet.push(pass_bytes.len() as u8);
+        packet.extend(pass_bytes);
 
-        // send password len
         self.socket
-            .write(&[pass_bytes.len() as u8])
-            .await
-            .context("Can't send password len")?;
-        self.socket
-            .write(pass_bytes)
+            .write_all(&packet)
             .await
             .context("Can't send password")?;
 

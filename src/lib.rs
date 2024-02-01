@@ -1,24 +1,3 @@
-#![forbid(unsafe_code)]
-#[macro_use]
-extern crate log;
-
-pub mod client;
-pub mod server;
-pub mod util;
-
-#[cfg(feature = "socks4")]
-pub mod socks4;
-
-use anyhow::Context;
-use std::fmt;
-use std::io;
-use thiserror::Error;
-use util::target_addr::read_address;
-use util::target_addr::TargetAddr;
-use util::target_addr::ToTargetAddr;
-
-use tokio::io::AsyncReadExt;
-
 //! Fast SOCKS5 client/server implementation written in Rust async/.await (with tokio).
 //!
 //! This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
@@ -57,6 +36,27 @@ use tokio::io::AsyncReadExt;
 //! ## Examples
 //!
 //! Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
+
+#![forbid(unsafe_code)]
+#[macro_use]
+extern crate log;
+
+pub mod client;
+pub mod server;
+pub mod util;
+
+#[cfg(feature = "socks4")]
+pub mod socks4;
+
+use anyhow::Context;
+use std::fmt;
+use std::io;
+use thiserror::Error;
+use util::target_addr::read_address;
+use util::target_addr::TargetAddr;
+use util::target_addr::ToTargetAddr;
+
+use tokio::io::AsyncReadExt;
 
 #[rustfmt::skip]
 pub mod consts {

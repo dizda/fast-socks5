@@ -4,7 +4,7 @@
 [![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
 [![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
 
-This library is maintained by [anyip.io](https://anyip.io/).
+This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
 
 ## Features
 

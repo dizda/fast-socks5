@@ -19,6 +19,56 @@ use util::target_addr::ToTargetAddr;
 
 use tokio::io::AsyncReadExt;
 
+//! Fast SOCKS5 client/server implementation written in Rust async/.await (with tokio).
+//!
+//! This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
+//!
+//! ## Features
+//!
+//! - An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.
+//! - An `async`/`.await` [SOCKS4 Client](https://www.openssh.com/txt/socks4.protocol) implementation.
+//! - An `async`/`.await` [SOCKS4a Client](https://www.openssh.com/txt/socks4a.protocol) implementation.
+//! - No **unsafe** code
+//! - Built on-top of `tokio` library
+//! - Ultra lightweight and scalable
+//! - No system dependencies
+//! - Cross-platform
+//! - Authentication methods:
+//!   - No-Auth method
+//!   - Username/Password auth method
+//!   - Custom auth methods can be implemented via the Authentication Trait
+//!   - Credentials returned on authentication success
+//! - All SOCKS5 RFC errors (replies) should be mapped
+//! - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
+//! - `IPv4`, `IPv6`, and `Domains` types are supported
+//! - Config helper for Socks5Server
+//! - Helpers to run a Socks5Server à la *"std's TcpStream"* via `incoming.next().await`
+//! - Examples come with real cases commands scenarios
+//! - Can disable `DNS resolving`
+//! - Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in a current authenticated environment)
+//! - Can disable command execution (useful if you just want to forward the request to a different server)
+//!
+//!
+//! ## Install
+//!
+//! Open in [crates.io](https://crates.io/crates/fast-socks5).
+//!
+//!
+//! ## Examples
+//!
+//! Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
+//!
+//! ```bash
+//! # Run client
+//! RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a perdu.com -p 80
+//!
+//! # Run server
+//! RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 password -u admin -p password
+//!
+//! # Test it with cURL
+//! curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
+//! ```
+
 #[rustfmt::skip]
 pub mod consts {
     pub const SOCKS5_VERSION:                          u8 = 0x05;

@@ -4,6 +4,8 @@
 [![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
 [![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
 
+This library is maintained by [anyip.io](https://anyip.io/).
+
 ## Features
 
 - An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.

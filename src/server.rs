@@ -957,7 +957,7 @@ where
 }
 
 /// Generate reply code according to the RFC.
-fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
+pub fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
     let (addr_type, mut ip_oct, mut port) = match sock_addr {
         SocketAddr::V4(sock) => (
             consts::SOCKS5_ADDR_TYPE_IPV4,

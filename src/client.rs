@@ -484,9 +484,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
         A: ToTargetAddr,
     {
         let mut buf = new_udp_header(addr)?;
+        let buf_len = buf.len();
         buf.extend_from_slice(data);
 
-        return Ok(self.socket.send(&buf).await?);
+        return Ok(self.socket.send(&buf).await? - buf_len);
     }
 
     /// Like `UdpSocket::recv_from`.

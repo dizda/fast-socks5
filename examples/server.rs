@@ -123,10 +123,9 @@ where
     task::spawn(async move {
         match fut.await {
             Ok(mut socket) => {
-                // the user is validated by the trait, so it can't be null
-                let user = socket.take_credentials().unwrap();
-
-                info!("user logged in with `{}`", user.username);
+                if let Some(user) = socket.take_credentials() {
+                    info!("user logged in with `{}`", user.username);
+                }
             }
             Err(err) => error!("{:#}", &err),
         }

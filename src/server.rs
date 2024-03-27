@@ -212,7 +212,9 @@ impl<A: Authentication> Socks5Server<A> {
     }
 }
 
-/// `Incoming` implements [`futures::stream::Stream`].
+/// `Incoming` implements [`futures_core::stream::Stream`].
+///
+/// [`futures_core::stream::Stream`]: https://docs.rs/futures/0.3.30/futures/stream/trait.Stream.html
 pub struct Incoming<'a, A: Authentication>(
     &'a Socks5Server<A>,
     Option<Pin<Box<dyn Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send + Sync + 'a>>>,
@@ -223,8 +225,9 @@ pub struct Incoming<'a, A: Authentication>(
 impl<'a, A: Authentication> Stream for Incoming<'a, A> {
     type Item = Result<Socks5Socket<TcpStream, A>>;
 
-    /// this code is mainly borrowed from [`Incoming::poll_next()` of `TcpListener`][tcpListener]
-    /// [tcpListener]: https://docs.rs/async-std/1.8.0/async_std/net/struct.TcpListener.html#method.incoming
+    /// this code is mainly borrowed from [`Incoming::poll_next()` of `TcpListener`][tcpListenerLink]
+    ///
+    /// [tcpListenerLink]: https://docs.rs/async-std/1.8.0/async_std/net/struct.TcpListener.html#method.incoming
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut AsyncContext<'_>) -> Poll<Option<Self::Item>> {
         loop {
             if self.1.is_none() {
@@ -287,8 +290,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     /// Most popular SOCKS5 clients [1] [2] ignore BND.ADDR and BND.PORT the reply of command
     /// CONNECT, but this field could be useful in some other command, such as UDP ASSOCIATE.
     ///
-    /// [1]. https://github.com/chromium/chromium/blob/bd2c7a8b65ec42d806277dd30f138a673dec233a/net/socket/socks5_client_socket.cc#L481
-    /// [2]. https://github.com/curl/curl/blob/d15692ebbad5e9cfb871b0f7f51a73e43762cee2/lib/socks.c#L978
+    /// [1]: https://github.com/chromium/chromium/blob/bd2c7a8b65ec42d806277dd30f138a673dec233a/net/socket/socks5_client_socket.cc#L481
+    /// [2]: https://github.com/curl/curl/blob/d15692ebbad5e9cfb871b0f7f51a73e43762cee2/lib/socks.c#L978
     pub fn set_reply_ip(&mut self, addr: IpAddr) {
         self.reply_ip = Some(addr);
     }

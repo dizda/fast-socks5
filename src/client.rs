@@ -401,11 +401,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// communicate with the socks5 server.
     ///
     /// # Examples
-    /// ```ignore
-    /// let backing_socket = TcpStream::connect("127.0.0.1:1080").await.unwrap();
-    /// let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0")
-    ///     .await
-    ///     .unwrap();
+    /// ```no_run
+    /// # use tokio::net::TcpStream;
+    /// # use fast_socks5::client;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>>{
+    ///     let backing_socket = TcpStream::connect("127.0.0.1:1080").await?;
+    ///     let tunnel = client::Socks5Datagram::bind(backing_socket, "[::]:0").await?;
+    /// #   Ok(())
+    /// # }
     /// ```
     pub async fn bind<U>(backing_socket: S, client_bind_addr: U) -> Result<Socks5Datagram<S>>
     where

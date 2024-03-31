@@ -55,25 +55,24 @@ async fn main() -> Result<()> {
 async fn spawn_socks_client() -> Result<()> {
     let opt: Opt = Opt::from_args();
     let domain = opt.target_addr.clone();
-    let mut socks;
     let mut config = Config::default();
     config.set_skip_auth(opt.skip_auth);
 
-    // Creating a SOCKS stream to the target address thru the socks server
-    if opt.username.is_some() {
-        socks = Socks5Stream::connect_with_password(
+    // Creating a SOCKS stream to the target address through the socks server
+    let mut socks = match opt.username {
+        Some(username) => Socks5Stream::connect_with_password(
             opt.socks_server,
             opt.target_addr,
             opt.target_port,
-            opt.username.unwrap(),
+            username,
             opt.password.expect("Please fill the password"),
             config,
         )
-        .await?;
-    } else {
-        socks = Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port, config)
-            .await?;
-    }
+            .await?,
+
+        _ => Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port, config)
+            .await?
+    };
 
     // Once connection is completed, can start to communicate with the server
     http_request(&mut socks, domain).await?;

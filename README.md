@@ -52,6 +52,16 @@ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 passwo
 curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
 ```
 
+## Benchmarks
+`proxychains`, `iperf3` and rust toolchain must be installed
+
+tested on Ubuntu 22.04 LTS
+### run simple benchmark
+```bash
+cd bench
+./bench.sh
+```
+
 ## TODO
 - Tests have to be implemented
 - Better Rust doc

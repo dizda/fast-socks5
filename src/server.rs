@@ -32,6 +32,10 @@ pub struct Config<A: Authentication = DenyAuthentication> {
     dns_resolve: bool,
     /// Enable command execution
     execute_command: bool,
+    /// Enable data transfer as part of command execution,
+    /// in case you want to stream to another proxy you'll
+    /// want to disable this
+    transfer_data: bool,
     /// Enable UDP support
     allow_udp: bool,
     /// For some complex scenarios, we may want to either accept Username/Password configuration
@@ -48,6 +52,7 @@ impl<A: Authentication> Default for Config<A> {
             skip_auth: false,
             dns_resolve: true,
             execute_command: true,
+            transfer_data: true,
             allow_udp: false,
             allow_no_auth: false,
             auth: None,
@@ -165,6 +170,14 @@ impl<A: Authentication> Config<A> {
     /// Set whether or not to execute commands
     pub fn set_execute_command(&mut self, value: bool) -> &mut Self {
         self.execute_command = value;
+        self
+    }
+
+    /// Set whether or not to transfer data as part of command execution,
+    /// in case you want to stream to another proxy you'll
+    /// want to disable this
+    pub fn set_transfer_data(&mut self, value: bool) -> &mut Self {
+        self.transfer_data = value;
         self
     }
 
@@ -648,6 +661,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     /// Connect to the target address that the client wants,
     /// then forward the data between them (client <=> target address).
     async fn execute_command_connect(&mut self) -> Result<()> {
+        if !self.config.transfer_data {
+            self.inner
+                .write(&new_reply(
+                    &ReplyError::Succeeded,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+                ))
+                .await
+                .context("Can't write successful reply")?;
+
+            self.inner.flush().await.context("Can't flush the reply!")?;
+
+            debug!("Wrote success");
+
+            return Ok(());
+        }
+
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
         let addr = self
@@ -675,12 +704,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
         debug!("Wrote success");
 
-        transfer(&mut self.inner, outbound).await
+        transfer(&mut self.inner, outbound).await?;
+
+        Ok(())
     }
 
     /// Bind to a random UDP port, wait for the traffic from
     /// the client, and then forward the data to the remote addr.
     async fn execute_command_udp_assoc(&mut self) -> Result<()> {
+        if !self.config.transfer_data {
+            // UDP non-data transfers aren't supported (yet)
+            return Err(ReplyError::ConnectionNotAllowed.into())
+        }
+
         // The DST.ADDR and DST.PORT fields contain the address and port that
         // the client expects to use to send UDP datagrams on for the
         // association. The server MAY use this information to limit access

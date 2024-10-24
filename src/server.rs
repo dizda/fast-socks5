@@ -39,6 +39,8 @@ pub struct Config<A: Authentication = DenyAuthentication> {
     allow_no_auth: bool,
     /// Contains the authentication trait to use the user against with
     auth: Option<Arc<A>>,
+    /// Disables Nagle's algorithm for TCP
+    disable_nagle: bool,
 }
 
 impl<A: Authentication> Default for Config<A> {
@@ -51,6 +53,7 @@ impl<A: Authentication> Default for Config<A> {
             allow_udp: false,
             allow_no_auth: false,
             auth: None,
+            disable_nagle: false,
         }
     }
 }
@@ -152,6 +155,7 @@ impl<A: Authentication> Config<A> {
             allow_udp: self.allow_udp,
             allow_no_auth: self.allow_no_auth,
             auth: Some(Arc::new(authentication)),
+            disable_nagle: self.disable_nagle,
         }
     }
 
@@ -660,6 +664,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
         // TCP connect with timeout, to avoid memory leak for connection that takes forever
         let outbound = tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
+
+        // Disable Nagle's algorithm if config specifies to do so.
+        outbound.set_nodelay(self.config.disable_nagle)?;
 
         debug!("Connected to remote destination");
 

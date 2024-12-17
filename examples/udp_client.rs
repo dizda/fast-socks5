@@ -2,6 +2,8 @@
 #[macro_use]
 extern crate log;
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
 use fast_socks5::{client::Socks5Datagram, Result};
 use structopt::StructOpt;
 use tokio::{
@@ -28,7 +30,7 @@ use tokio::{
 struct Opt {
     /// Socks5 server address + port, e.g. `127.0.0.1:1080`
     #[structopt(short, long)]
-    pub socks_server: String,
+    pub socks_server: SocketAddr,
 
     /// Target (DNS) server address, e.g. `8.8.8.8`
     #[structopt(short = "a", long)]
@@ -60,18 +62,25 @@ async fn spawn_socks_client() -> Result<()> {
 
     // Creating a SOCKS stream to the target address through the socks server
     let backing_socket = TcpStream::connect(opt.socks_server).await?;
+    // At least on some platforms it is important to use the same protocol as the server
+    // XXX: assumes the returned UDP proxy will have the same protocol as the socks_server
+    let client_bind_addr = if opt.socks_server.is_ipv4() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+    };
     let mut socks = match opt.username {
         Some(username) => {
             Socks5Datagram::bind_with_password(
                 backing_socket,
-                "[::]:0",
+                client_bind_addr,
                 &username,
                 &opt.password.expect("Please fill the password"),
             )
             .await?
         }
 
-        _ => Socks5Datagram::bind(backing_socket, "[::]:0").await?,
+        _ => Socks5Datagram::bind(backing_socket, client_bind_addr).await?,
     };
 
     // Once socket creation is completed, can start to communicate with the server

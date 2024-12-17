@@ -466,8 +466,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;
+        info!("UdpSocket client connecting to {}", proxy_addr_resolved);
         out_sock.connect(proxy_addr_resolved).await?;
-        info!("UdpSocket client connected to {}", proxy_addr_resolved);
+        info!("UdpSocket client connected");
 
         Ok(Socks5Datagram {
             socket: out_sock,

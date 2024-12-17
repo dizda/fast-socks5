@@ -30,6 +30,10 @@ struct Opt {
     #[structopt(short, long)]
     pub listen_addr: String,
 
+    /// Our external IP address to be sent in reply packets (required for UDP)
+    #[structopt(long)]
+    pub public_addr: Option<std::net::IpAddr>,
+
     /// Request timeout
     #[structopt(short = "t", long, default_value = "10")]
     pub request_timeout: u64,
@@ -41,6 +45,10 @@ struct Opt {
     /// Don't perform the auth handshake, send directly the command request
     #[structopt(short = "k", long)]
     pub skip_auth: bool,
+
+    /// Allow UDP proxying, requires public-addr to be set
+    #[structopt(short = "U", long)]
+    pub allow_udp: bool,
 }
 
 /// Choose the authentication type
@@ -72,9 +80,16 @@ async fn main() -> Result<()> {
 
 async fn spawn_socks_server() -> Result<()> {
     let opt: Opt = Opt::from_args();
+    if opt.allow_udp && opt.public_addr.is_none() {
+        return Err(SocksError::ArgumentInputError(
+            "Can't allow UDP if public-addr is not set",
+        ));
+    }
+
     let mut config = Config::default();
     config.set_request_timeout(opt.request_timeout);
     config.set_skip_auth(opt.skip_auth);
+    config.set_udp_support(opt.allow_udp);
 
     let config = match opt.auth {
         AuthMode::NoAuth => {
@@ -103,7 +118,10 @@ async fn spawn_socks_server() -> Result<()> {
     // Standard TCP loop
     while let Some(socket_res) = incoming.next().await {
         match socket_res {
-            Ok(socket) => {
+            Ok(mut socket) => {
+                if let Some(addr) = opt.public_addr {
+                    socket.set_reply_ip(addr);
+                }
                 spawn_and_log_error(socket.upgrade_to_socks5());
             }
             Err(err) => {

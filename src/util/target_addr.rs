@@ -5,7 +5,7 @@ use crate::SocksError;
 use anyhow::Context;
 use std::fmt;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::vec::IntoIter;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -176,6 +176,15 @@ impl ToTargetAddr for SocketAddrV4 {
 impl ToTargetAddr for SocketAddrV6 {
     fn to_target_addr(&self) -> io::Result<TargetAddr> {
         SocketAddr::V6(*self).to_target_addr()
+    }
+}
+
+impl ToTargetAddr for (IpAddr, u16) {
+    fn to_target_addr(&self) -> io::Result<TargetAddr> {
+        match self.0 {
+            IpAddr::V4(ipv4_addr) => (ipv4_addr, self.1).to_target_addr(),
+            IpAddr::V6(ipv6_addr) => (ipv6_addr, self.1).to_target_addr(),
+        }
     }
 }
 

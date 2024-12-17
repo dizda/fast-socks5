@@ -777,6 +777,8 @@ async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result
 
         debug!("Server forward to packet to {}", target_addr);
         let mut target_addr = target_addr
+            .resolve_dns()
+            .await?
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;

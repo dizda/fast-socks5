@@ -21,6 +21,7 @@ This library is maintained by [anyip.io](https://anyip.io/) a residential and mo
   - Username/Password auth method
   - Custom auth methods can be implemented via the Authentication Trait
   - Credentials returned on authentication success
+- UDP is supported
 - All SOCKS5 RFC errors (replies) should be mapped
 - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
 - `IPv4`, `IPv6`, and `Domains` types are supported
@@ -55,7 +56,6 @@ curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
 ## TODO
 - Tests have to be implemented
 - Better Rust doc
-- UDP bind command not implemented
 
 ## Inspired by
 

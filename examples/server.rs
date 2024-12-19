@@ -136,7 +136,7 @@ async fn spawn_socks_server() -> Result<()> {
 fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
 where
     F: Future<Output = Result<Socks5Socket<T, SimpleUserPassword>>> + Send + 'static,
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     task::spawn(async move {
         match fut.await {

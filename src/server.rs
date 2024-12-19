@@ -22,8 +22,12 @@ use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::try_join;
 use tokio_stream::Stream;
 
+pub type Config<T> = BaseConfig<TcpStream, T, DefaultCommandExecutor>;
+
 #[derive(Clone)]
-pub struct Config<A: Authentication = DenyAuthentication> {
+pub struct BaseConfig<T, A: Authentication = DenyAuthentication, C: CommandExecutor<T> = DefaultCommandExecutor>
+where T: AsyncRead + AsyncWrite + Unpin
+    {
     /// Timeout of the command request
     request_timeout: u64,
     /// Avoid useless roundtrips if we don't need the Authentication layer
@@ -41,11 +45,14 @@ pub struct Config<A: Authentication = DenyAuthentication> {
     auth: Option<Arc<A>>,
     /// Disables Nagle's algorithm for TCP
     nodelay: bool,
+    /// Contains the relay socket trait to proxy the overlay traffic
+    executor: Option<Arc<C>>,
+    _t: std::marker::PhantomData<T>
 }
 
-impl<A: Authentication> Default for Config<A> {
+impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: CommandExecutor<T>> Default for BaseConfig<T, A, C> {
     fn default() -> Self {
-        Config {
+        BaseConfig {
             request_timeout: 10,
             skip_auth: false,
             dns_resolve: true,
@@ -54,6 +61,8 @@ impl<A: Authentication> Default for Config<A> {
             allow_no_auth: false,
             auth: None,
             nodelay: false,
+            executor: None,
+            _t: std::marker::PhantomData,
         }
     }
 }
@@ -128,7 +137,104 @@ impl Authentication for AcceptAuthentication {
     }
 }
 
-impl<A: Authentication> Config<A> {
+#[async_trait::async_trait]
+pub trait CommandExecutor<T>: Send + Sync + Default {
+    async fn connect(
+        &self,
+        inbound: &mut T,
+        target_addr: &TargetAddr,
+        timeout: u64,
+        nodelay: bool,
+    ) -> Result<()>;
+
+    async fn udp_associate(
+        &self,
+        inbound: &mut T,
+        target_addr: Option<&TargetAddr>,
+        reply_ip: IpAddr,
+    ) -> Result<()>;
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct DefaultCommandExecutor;
+
+#[async_trait::async_trait]
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> CommandExecutor<T> for DefaultCommandExecutor {
+
+    async fn connect(
+        &self,
+        inbound: &mut T,
+        target_addr: &TargetAddr,
+        timeout: u64,
+        nodelay: bool,
+    ) -> Result<()> {
+        let addr = target_addr
+            .to_socket_addrs()?
+            .next()
+            .context("unreachable")?;
+
+        // TCP connect with timeout, to avoid memory leak for connection that takes forever
+        let outbound = tcp_connect_with_timeout(addr, timeout).await?;
+
+        // Disable Nagle's algorithm if config specifies to do so.
+        outbound.set_nodelay(nodelay)?;
+
+        debug!("Connected to remote destination");
+
+        inbound
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            ))
+            .await
+            .context("Can't write successful reply")?;
+
+        inbound.flush().await.context("Can't flush the reply!")?;
+
+        debug!("Wrote success");
+
+        transfer(inbound, outbound).await
+    }
+
+    /// Bind to a random UDP port, wait for the traffic from
+    /// the client, and then forward the data to the remote addr.
+    async fn udp_associate(
+        &self,
+        inbound: &mut T,
+        target_addr: Option<&TargetAddr>,
+        reply_ip: IpAddr,
+    ) -> Result<()> {
+        // The DST.ADDR and DST.PORT fields contain the address and port that
+        // the client expects to use to send UDP datagrams on for the
+        // association. The server MAY use this information to limit access
+        // to the association.
+        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+        //
+        // We do NOT limit the access from the client currently in this implementation.
+        let _not_used = target_addr;
+
+        // Listen with UDP6 socket, so the client can connect to it with either
+        // IPv4 or IPv6.
+        let peer_sock = UdpSocket::bind("[::]:0").await?;
+
+        // Respect the pre-populated reply IP address.
+        inbound
+            .write(&new_reply(
+                &ReplyError::Succeeded,
+                SocketAddr::new(reply_ip, peer_sock.local_addr()?.port()),
+            ))
+            .await
+            .context("Can't write successful reply")?;
+
+        debug!("Wrote success");
+
+        transfer_udp(inbound, peer_sock).await?;
+
+        Ok(())
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Send + Unpin, A: Authentication, C: CommandExecutor<S>> BaseConfig<S, A, C> {
     /// How much time it should wait until the request timeout.
     pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
         self.request_timeout = n;
@@ -146,8 +252,8 @@ impl<A: Authentication> Config<A> {
     /// Enable authentication
     /// 'static lifetime for Authentication avoid us to use `dyn Authentication`
     /// and set the Arc before calling the function.
-    pub fn with_authentication<T: Authentication + 'static>(self, authentication: T) -> Config<T> {
-        Config {
+    pub fn with_authentication<T: Authentication + 'static>(self, authentication: T) -> BaseConfig<S, T, C> {
+        BaseConfig {
             request_timeout: self.request_timeout,
             skip_auth: self.skip_auth,
             dns_resolve: self.dns_resolve,
@@ -156,6 +262,23 @@ impl<A: Authentication> Config<A> {
             allow_no_auth: self.allow_no_auth,
             auth: Some(Arc::new(authentication)),
             nodelay: self.nodelay,
+            executor: None,
+            _t: std::marker::PhantomData,
+        }
+    }
+
+    pub fn with_command_executor<T: CommandExecutor<S> + 'static>(self, executor: T) -> BaseConfig<S, A, T> {
+        BaseConfig {
+            request_timeout: self.request_timeout,
+            skip_auth: self.skip_auth,
+            dns_resolve: self.dns_resolve,
+            execute_command: self.execute_command,
+            allow_udp: self.allow_udp,
+            allow_no_auth: self.allow_no_auth,
+            auth: self.auth,
+            nodelay: self.nodelay,
+            executor: Some(Arc::new(executor)),
+            _t: std::marker::PhantomData,
         }
     }
 
@@ -187,23 +310,23 @@ impl<A: Authentication> Config<A> {
 
 /// Wrapper of TcpListener
 /// Useful if you don't use any existing TcpListener's streams.
-pub struct Socks5Server<A: Authentication = DenyAuthentication> {
+pub struct Socks5Server<T: AsyncRead + AsyncWrite + Send + Unpin = TcpStream, A: Authentication = DenyAuthentication, C: CommandExecutor<T> = DefaultCommandExecutor> {
     listener: TcpListener,
-    config: Arc<Config<A>>,
+    config: Arc<BaseConfig<T, A, C>>,
 }
 
-impl<A: Authentication + Default> Socks5Server<A> {
+impl<T: AsyncRead + AsyncWrite + Send + Unpin, A: Authentication + Default, C: CommandExecutor<T>> Socks5Server<T, A, C> {
     pub async fn bind<S: AsyncToSocketAddrs>(addr: S) -> io::Result<Self> {
         let listener = TcpListener::bind(&addr).await?;
-        let config = Arc::new(Config::default());
+        let config = Arc::new(BaseConfig::default());
 
         Ok(Socks5Server { listener, config })
     }
 }
 
-impl<A: Authentication> Socks5Server<A> {
+impl<S: AsyncRead + AsyncWrite + Send + Unpin, A: Authentication, C: CommandExecutor<S>> Socks5Server<S, A, C> {
     /// Set a custom config
-    pub fn with_config<T: Authentication>(self, config: Config<T>) -> Socks5Server<T> {
+    pub fn with_config<T: Authentication>(self, config: BaseConfig<S, T, C>) -> Socks5Server<S, T, C> {
         Socks5Server {
             listener: self.listener,
             config: Arc::new(config),
@@ -211,7 +334,7 @@ impl<A: Authentication> Socks5Server<A> {
     }
 
     /// Can loop on `incoming().next()` to iterate over incoming connections.
-    pub fn incoming(&self) -> Incoming<'_, A> {
+    pub fn incoming(&self) -> Incoming<'_, S, A, C> {
         Incoming(self, None)
     }
 }
@@ -219,15 +342,15 @@ impl<A: Authentication> Socks5Server<A> {
 /// `Incoming` implements [`futures_core::stream::Stream`].
 ///
 /// [`futures_core::stream::Stream`]: https://docs.rs/futures/0.3.30/futures/stream/trait.Stream.html
-pub struct Incoming<'a, A: Authentication>(
-    &'a Socks5Server<A>,
+pub struct Incoming<'a, S: AsyncRead + AsyncWrite + Send + Unpin, A: Authentication, C: CommandExecutor<S>>(
+    &'a Socks5Server<S, A, C>,
     Option<Pin<Box<dyn Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send + Sync + 'a>>>,
 );
 
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
-impl<'a, A: Authentication> Stream for Incoming<'a, A> {
-    type Item = Result<Socks5Socket<TcpStream, A>>;
+impl<'a, A: Authentication, C: CommandExecutor<TcpStream>> Stream for Incoming<'a, TcpStream, A, C> {
+    type Item = Result<Socks5Socket<TcpStream, A, C>>;
 
     /// this code is mainly borrowed from [`Incoming::poll_next()` of `TcpListener`][tcpListenerLink]
     ///
@@ -259,9 +382,9 @@ impl<'a, A: Authentication> Stream for Incoming<'a, A> {
 }
 
 /// Wrap TcpStream and contains Socks5 protocol implementation.
-pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
+pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication, C: CommandExecutor<T> = DefaultCommandExecutor> {
     inner: T,
-    config: Arc<Config<A>>,
+    config: Arc<BaseConfig<T, A, C>>,
     auth: AuthenticationMethod,
     target_addr: Option<TargetAddr>,
     cmd: Option<Socks5Command>,
@@ -272,8 +395,8 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
     credentials: Option<A::Item>,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
-    pub fn new(socket: T, config: Arc<Config<A>>) -> Self {
+impl<T: AsyncRead + AsyncWrite + Send + Unpin, A: Authentication, C: CommandExecutor<T>> Socks5Socket<T, A, C> {
+    pub fn new(socket: T, config: Arc<BaseConfig<T, A, C>>) -> Self {
         Socks5Socket {
             inner: socket,
             config,
@@ -302,7 +425,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
-    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A>> {
+    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A, C>> {
         trace!("upgrading to socks5...");
 
         // Handshake
@@ -654,70 +777,34 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     async fn execute_command_connect(&mut self) -> Result<()> {
         // async-std's ToSocketAddrs doesn't supports external trait implementation
         // @see https://github.com/async-rs/async-std/issues/539
-        let addr = self
-            .target_addr
-            .as_ref()
-            .context("target_addr empty")?
-            .to_socket_addrs()?
-            .next()
-            .context("unreachable")?;
+        let addr = self.target_addr.as_ref().context("target_addr empty")?;
 
-        // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        let outbound = tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
-
-        // Disable Nagle's algorithm if config specifies to do so.
-        outbound.set_nodelay(self.config.nodelay)?;
-
-        debug!("Connected to remote destination");
-
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        self.inner.flush().await.context("Can't flush the reply!")?;
-
-        debug!("Wrote success");
-
-        transfer(&mut self.inner, outbound).await
+        match self.config.executor.as_ref() {
+            Some(executor) => executor.connect(
+                &mut self.inner,
+                addr,
+                self.config.request_timeout,
+                self.config.nodelay,
+            ).await,
+            None => {
+                debug!("No executor provided, using the default");
+                DefaultCommandExecutor.connect(
+                    &mut self.inner,
+                    addr,
+                    self.config.request_timeout,
+                    self.config.nodelay,
+                ).await
+            }
+        }
     }
 
-    /// Bind to a random UDP port, wait for the traffic from
-    /// the client, and then forward the data to the remote addr.
     async fn execute_command_udp_assoc(&mut self) -> Result<()> {
-        // The DST.ADDR and DST.PORT fields contain the address and port that
-        // the client expects to use to send UDP datagrams on for the
-        // association. The server MAY use this information to limit access
-        // to the association.
-        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
-        //
-        // We do NOT limit the access from the client currently in this implementation.
-        let _not_used = self.target_addr.as_ref();
-
-        // Listen with UDP6 socket, so the client can connect to it with either
-        // IPv4 or IPv6.
-        let peer_sock = UdpSocket::bind("[::]:0").await?;
-
-        // Respect the pre-populated reply IP address.
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(
-                    self.reply_ip.context("invalid reply ip")?,
-                    peer_sock.local_addr()?.port(),
-                ),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        debug!("Wrote success");
-
-        transfer_udp(peer_sock).await?;
-
-        Ok(())
+        match self.config.executor.as_ref() {
+            Some(executor) => executor.udp_associate(&mut self.inner, self.target_addr.as_ref(), self.reply_ip.context("invalid reply ip")?,
+            ).await,
+            None => DefaultCommandExecutor.udp_associate(&mut self.inner, self.target_addr.as_ref(), self.reply_ip.context("invalid reply ip")?,
+            ).await
+        }
     }
 
     pub fn target_addr(&self) -> Option<&TargetAddr> {
@@ -803,12 +890,18 @@ async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Resul
     }
 }
 
-async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
+async fn transfer_udp<T: AsyncRead + AsyncWrite + Unpin + Send>(parent_sock: &mut T, inbound: UdpSocket) -> Result<()> {
     let outbound = UdpSocket::bind("[::]:0").await?;
 
     let req_fut = handle_udp_request(&inbound, &outbound);
     let res_fut = handle_udp_response(&inbound, &outbound);
-    match try_join!(req_fut, res_fut) {
+    let parent_fut = async {
+        parent_sock.read(&mut [0u8; 0]).await.map_err(|e| {
+            debug!("Parent socket closed: {:?}", e);
+            e.into()
+        })
+    };
+    match try_join!(req_fut, res_fut, parent_fut) {
         Ok(_) => {}
         Err(error) => return Err(error),
     }
@@ -819,12 +912,12 @@ async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"
 //
 // cf. https://users.rust-lang.org/t/take-in-impl-future-cannot-borrow-data-in-a-dereference-of-pin/52042
-impl<T, A: Authentication> Unpin for Socks5Socket<T, A> where T: AsyncRead + AsyncWrite + Unpin {}
+impl<T, A: Authentication, C: CommandExecutor<T>> Unpin for Socks5Socket<T, A, C> where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 /// Allow us to read directly from the struct
-impl<T, A: Authentication> AsyncRead for Socks5Socket<T, A>
+impl<T, A: Authentication, C: CommandExecutor<T>> AsyncRead for Socks5Socket<T, A, C>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -836,9 +929,9 @@ where
 }
 
 /// Allow us to write directly into the struct
-impl<T, A: Authentication> AsyncWrite for Socks5Socket<T, A>
+impl<T, A: Authentication, C: CommandExecutor<T>> AsyncWrite for Socks5Socket<T, A, C>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -892,7 +985,8 @@ fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
 
 #[cfg(test)]
 mod test {
-    use crate::server::Socks5Server;
+    use crate::server::{Socks5Server, DefaultCommandExecutor};
+    use tokio::net::TcpStream;
     use tokio_test::block_on;
 
     use super::AcceptAuthentication;
@@ -900,7 +994,7 @@ mod test {
     #[test]
     fn test_bind() {
         let f = async {
-            let _server = Socks5Server::<AcceptAuthentication>::bind("127.0.0.1:1080")
+            let _server = Socks5Server::<TcpStream, AcceptAuthentication, DefaultCommandExecutor>::bind("127.0.0.1:1080")
                 .await
                 .unwrap();
         };

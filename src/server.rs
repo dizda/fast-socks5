@@ -137,8 +137,17 @@ impl Authentication for AcceptAuthentication {
     }
 }
 
+/// Use this trait to handle a custom command executor on your end, such as forward the TCP/UDP traffic in a custom way.
 #[async_trait::async_trait]
 pub trait CommandExecutor<T>: Send + Sync + Default {
+    /// Connect to the target address and transfer the data between the inbound and the outbound.
+    ///
+    /// You can use any underlying protocol or socket to connect to the target address, and then 
+    /// transfer the data between the inbound and the outbound. A SOCKS reply message should
+    /// be sent to the client in the underlying protocol, which could be constructed by the [new_reply]
+    /// function.
+    ///
+    /// The `timeout` parameter is the time in seconds to wait for the connection to be established.
     async fn connect(
         &self,
         inbound: &mut T,
@@ -147,6 +156,18 @@ pub trait CommandExecutor<T>: Send + Sync + Default {
         nodelay: bool,
     ) -> Result<()>;
 
+    /// Bind to a random UDP port, wait for the traffic from the client, and then forward the data to the remote addr.
+    ///
+    /// You can use any underlying protocol or socket to send and receive UDP packets to the outbound. A SOCKS reply message
+    /// should be sent to the client in the underlying protocol, which could be constructed by the [new_reply] function.
+    /// The SOCKS5 reply message should contain the address and port that the client needs to use to send UDP datagrams on for the association.
+    ///
+    /// Other useful helper functions:
+    /// - [parse_udp_request] can be used to parse the UDP request from the client.
+    /// - [new_udp_header] can be used to construct the UDP response to the client.
+    ///
+    /// The `target_addr` parameter is the target address that the client expects to use to send UDP datagrams on for the association.
+    /// The `reply_ip` parameter is the IP address and port configured in the config, it may be used in the reply message.
     async fn udp_associate(
         &self,
         inbound: &mut T,
@@ -160,7 +181,7 @@ pub struct DefaultCommandExecutor;
 
 #[async_trait::async_trait]
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> CommandExecutor<T> for DefaultCommandExecutor {
-
+    /// Connect to the target address and transfer the data between the inbound and the outbound.
     async fn connect(
         &self,
         inbound: &mut T,

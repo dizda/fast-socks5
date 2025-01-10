@@ -359,23 +359,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         };
 
         let (proto, cmd, target_addr) = proto.read_command().await?;
-        self.cmd = Some(match cmd {
-            /* XXX: this is redundant, just to do it early before dns resolve? */
-            Socks5Command::UDPAssociate if !self.config.allow_udp => {
-                proto.reply_error(&ReplyError::CommandNotSupported).await?;
-                return Err(ReplyError::CommandNotSupported.into());
-            }
-            Socks5Command::TCPBind => {
-                proto.reply_error(&ReplyError::CommandNotSupported).await?;
-                return Err(ReplyError::CommandNotSupported.into());
-            }
-            c => c,
-        });
+        self.cmd = Some(cmd);
         self.target_addr = Some(target_addr);
-        self.inner = proto.inner;
 
         if self.config.dns_resolve {
-            self.resolve_dns().await?;
+            if let Some(addr) = self.target_addr {
+                self.target_addr = Some(addr.resolve_dns().await?);
+            }
         } else {
             debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
         }
@@ -384,7 +374,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             /* we've just set it to Some above.
              * also, not gonna be used externally since we execute it here */
             let cmd = self.cmd.take().unwrap();
-            let proto = Socks5ServerProtocol::<T, states::CommandRead>::new(self.inner);
 
             match cmd {
                 Socks5Command::TCPBind => {
@@ -446,6 +435,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                     }
                 }
             };
+        } else {
+            self.inner = proto.inner;
         }
 
         Ok(self)

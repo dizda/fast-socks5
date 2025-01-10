@@ -9,6 +9,7 @@ use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
 use anyhow::Context;
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
@@ -272,6 +273,32 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
     credentials: Option<A::Item>,
 }
 
+pub mod states {
+    pub struct Opened;
+    pub struct AuthMethodsRead;
+    pub struct AuthMethodChosen;
+}
+
+pub struct Socks5ServerProtocol<T, S> {
+    inner: T,
+    _state: PhantomData<S>,
+}
+
+impl<T, S> Socks5ServerProtocol<T, S> {
+    fn new(inner: T) -> Self {
+        Socks5ServerProtocol {
+            inner,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T> Socks5ServerProtocol<T, states::Opened> {
+    pub fn start(inner: T) -> Self {
+        Self::new(inner)
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn new(socket: T, config: Arc<Config<A>>) -> Self {
         Socks5Socket {
@@ -307,13 +334,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
         // Handshake
         if !self.config.skip_auth {
-            let methods = self.get_methods().await?;
+            let (proto, methods) = Socks5ServerProtocol::start(self.inner)
+                .get_methods()
+                .await?;
 
-            let auth_method = self.can_accept_method(methods).await?;
+            let (proto, auth_method) = proto
+                .can_accept_method(methods, self.config.as_ref())
+                .await?;
 
             if self.config.auth.is_some() {
-                let credentials = self.authenticate(auth_method).await?;
+                let (inner, credentials) = proto
+                    .authenticate(auth_method, self.config.as_ref())
+                    .await?;
+                self.inner = inner;
                 self.credentials = Some(credentials);
+            } else {
+                self.inner = proto.inner;
             }
         } else {
             debug!("skipping auth");
@@ -337,7 +373,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn into_inner(self) -> T {
         self.inner
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> {
     /// Read the authentication method provided by the client.
     /// A client send a list of methods that he supports, he could send
     ///
@@ -354,7 +392,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     ///     eg. (auth)     {5, 3}
     /// ```
     ///
-    async fn get_methods(&mut self) -> Result<Vec<u8>> {
+    async fn get_methods(
+        mut self,
+    ) -> Result<(Socks5ServerProtocol<T, states::AuthMethodsRead>, Vec<u8>)> {
         trace!("Socks5Socket: get_methods()");
         // read the first 2 bytes which contains the SOCKS version and the methods len()
         let [version, methods_len] =
@@ -377,9 +417,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         debug!("methods supported sent by the client: {:?}", &methods);
 
         // Return methods available
-        Ok(methods)
+        Ok((Socks5ServerProtocol::new(self.inner), methods))
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMethodsRead> {
     /// Decide to whether or not, accept the authentication method.
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
@@ -399,16 +441,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     ///     eg. (non-acceptable)  {5, 0xff}
     /// ```
     ///
-    async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<u8> {
+    async fn can_accept_method<A: Authentication>(
+        mut self,
+        client_methods: Vec<u8>,
+        config: &Config<A>,
+    ) -> Result<(Socks5ServerProtocol<T, states::AuthMethodChosen>, u8)> {
         let method_supported;
 
-        if let Some(_auth) = self.config.auth.as_ref() {
+        if let Some(_auth) = config.auth.as_ref() {
             if client_methods.contains(&consts::SOCKS5_AUTH_METHOD_PASSWORD) {
                 // can auth with password
                 method_supported = consts::SOCKS5_AUTH_METHOD_PASSWORD;
             } else {
                 // client hasn't provided a password
-                if self.config.allow_no_auth {
+                if config.allow_no_auth {
                     // but we allow no auth, for ip whitelisting
                     method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
                 } else {
@@ -438,9 +484,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             .write(&[consts::SOCKS5_VERSION, method_supported])
             .await
             .context("Can't reply with method auth-none")?;
-        Ok(method_supported)
+        Ok((Socks5ServerProtocol::new(self.inner), method_supported))
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMethodChosen> {
     async fn read_username_password(socket: &mut T) -> Result<(String, String)> {
         trace!("Socks5Socket: authenticate()");
         let [version, user_len] = read_exact!(socket, [0u8; 2]).context("Can't read user len")?;
@@ -485,7 +533,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     ///  - this server has `Authentication` trait implemented.
     ///  - and the client supports authentication via username/password
     ///  - or the client doesn't send authentication, but we let the trait decides if the `allow_no_auth()` set as `true`
-    async fn authenticate(&mut self, auth_method: u8) -> Result<A::Item> {
+    async fn authenticate<A: Authentication>(
+        mut self,
+        auth_method: u8,
+        config: &Config<A>,
+    ) -> Result<(T, A::Item)> {
         let credentials = if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
             let credentials = Self::read_username_password(&mut self.inner).await?;
             Some(credentials)
@@ -496,7 +548,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             None
         };
 
-        let auth = self.config.auth.as_ref().context("No auth module")?;
+        let auth = config.auth.as_ref().context("No auth module")?;
 
         if let Some(credentials) = auth.authenticate(credentials).await {
             if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
@@ -509,7 +561,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
             info!("User logged successfully.");
 
-            return Ok(credentials);
+            return Ok((self.inner, credentials));
         } else {
             self.inner
                 .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
@@ -521,7 +573,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             )));
         }
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     /// Wrapper to principally cover ReplyError types for both functions read & execute request.
     async fn request(&mut self) -> Result<()> {
         self.read_command().await?;

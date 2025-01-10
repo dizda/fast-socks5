@@ -360,6 +360,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
         let (proto, cmd, target_addr) = proto.read_command().await?;
         self.cmd = Some(match cmd {
+            /* XXX: this is redundant, just to do it early before dns resolve? */
             Socks5Command::UDPAssociate if !self.config.allow_udp => {
                 proto.reply_error(&ReplyError::CommandNotSupported).await?;
                 return Err(ReplyError::CommandNotSupported.into());
@@ -380,17 +381,70 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         }
 
         if self.config.execute_command {
-            match self.execute_command().await {
-                Ok(_) => {}
-                Err(SocksError::ReplyError(e)) => {
-                    // If a reply error has been returned, we send it to the client
-                    Socks5ServerProtocol::<T, states::CommandRead>::new(self.inner)
-                        .reply_error(&e)
-                        .await?;
-                    return Err(e.into()); // propagate the error to end this connection's task
+            /* we've just set it to Some above.
+             * also, not gonna be used externally since we execute it here */
+            let cmd = self.cmd.take().unwrap();
+            let proto = Socks5ServerProtocol::<T, states::CommandRead>::new(self.inner);
+
+            match cmd {
+                Socks5Command::TCPBind => {
+                    proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                    return Err(ReplyError::CommandNotSupported.into());
                 }
-                // if any other errors has been detected, we simply end connection's task
-                Err(d) => return Err(d),
+                Socks5Command::TCPConnect => {
+                    let addr = self
+                        .target_addr
+                        .as_ref()
+                        .context("target_addr empty")?
+                        .to_socket_addrs()?
+                        .next()
+                        .context("unreachable")?;
+
+                    // TCP connect with timeout, to avoid memory leak for connection that takes forever
+                    let outbound =
+                        tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
+
+                    // Disable Nagle's algorithm if config specifies to do so.
+                    outbound.set_nodelay(self.config.nodelay)?;
+
+                    debug!("Connected to remote destination");
+
+                    let mut inner = proto
+                        .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+                        .await?;
+
+                    transfer(&mut inner, outbound).await?;
+                    self.inner = inner;
+                }
+                Socks5Command::UDPAssociate => {
+                    if self.config.allow_udp {
+                        // The DST.ADDR and DST.PORT fields contain the address and port that
+                        // the client expects to use to send UDP datagrams on for the
+                        // association. The server MAY use this information to limit access
+                        // to the association.
+                        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+                        //
+                        // We do NOT limit the access from the client currently in this implementation.
+                        let _not_used = self.target_addr.as_ref();
+
+                        // Listen with UDP6 socket, so the client can connect to it with either
+                        // IPv4 or IPv6.
+                        let peer_sock = UdpSocket::bind("[::]:0").await?;
+
+                        // Respect the pre-populated reply IP address.
+                        self.inner = proto
+                            .reply_success(SocketAddr::new(
+                                self.reply_ip.context("invalid reply ip")?,
+                                peer_sock.local_addr()?.port(),
+                            ))
+                            .await?;
+
+                        transfer_udp(peer_sock).await?;
+                    } else {
+                        proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                        return Err(ReplyError::CommandNotSupported.into());
+                    }
+                }
             };
         }
 
@@ -604,6 +658,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMeth
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
+    /// Reply success to the client according to the RFC.
+    /// This consumes the wrapper as after this message actual proxying should begin.
+    async fn reply_success(mut self, sock_addr: SocketAddr) -> Result<T> {
+        self.inner
+            .write(&new_reply(&ReplyError::Succeeded, sock_addr))
+            .await
+            .context("Can't write successful reply")?;
+
+        self.inner.flush().await.context("Can't flush the reply!")?;
+
+        debug!("Wrote success");
+        Ok(self.inner)
+    }
+
     /// Reply error to the client with the reply code according to the RFC.
     async fn reply_error(mut self, error: &ReplyError) -> Result<()> {
         let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
@@ -686,95 +754,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                 TargetAddr::Ip(_) => Some(target_addr),
             };
         }
-
-        Ok(())
-    }
-
-    /// Execute the socks5 command that the client wants.
-    async fn execute_command(&mut self) -> Result<()> {
-        match &self.cmd {
-            None => Err(ReplyError::CommandNotSupported.into()),
-            Some(cmd) => match cmd {
-                Socks5Command::TCPBind => Err(ReplyError::CommandNotSupported.into()),
-                Socks5Command::TCPConnect => return self.execute_command_connect().await,
-                Socks5Command::UDPAssociate => {
-                    if self.config.allow_udp {
-                        return self.execute_command_udp_assoc().await;
-                    } else {
-                        Err(ReplyError::CommandNotSupported.into())
-                    }
-                }
-            },
-        }
-    }
-
-    /// Connect to the target address that the client wants,
-    /// then forward the data between them (client <=> target address).
-    async fn execute_command_connect(&mut self) -> Result<()> {
-        // async-std's ToSocketAddrs doesn't supports external trait implementation
-        // @see https://github.com/async-rs/async-std/issues/539
-        let addr = self
-            .target_addr
-            .as_ref()
-            .context("target_addr empty")?
-            .to_socket_addrs()?
-            .next()
-            .context("unreachable")?;
-
-        // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        let outbound = tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
-
-        // Disable Nagle's algorithm if config specifies to do so.
-        outbound.set_nodelay(self.config.nodelay)?;
-
-        debug!("Connected to remote destination");
-
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        self.inner.flush().await.context("Can't flush the reply!")?;
-
-        debug!("Wrote success");
-
-        transfer(&mut self.inner, outbound).await
-    }
-
-    /// Bind to a random UDP port, wait for the traffic from
-    /// the client, and then forward the data to the remote addr.
-    async fn execute_command_udp_assoc(&mut self) -> Result<()> {
-        // The DST.ADDR and DST.PORT fields contain the address and port that
-        // the client expects to use to send UDP datagrams on for the
-        // association. The server MAY use this information to limit access
-        // to the association.
-        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
-        //
-        // We do NOT limit the access from the client currently in this implementation.
-        let _not_used = self.target_addr.as_ref();
-
-        // Listen with UDP6 socket, so the client can connect to it with either
-        // IPv4 or IPv6.
-        let peer_sock = UdpSocket::bind("[::]:0").await?;
-
-        // Respect the pre-populated reply IP address.
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(
-                    self.reply_ip.context("invalid reply ip")?,
-                    peer_sock.local_addr()?.port(),
-                ),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        debug!("Wrote success");
-
-        transfer_udp(peer_sock).await?;
 
         Ok(())
     }

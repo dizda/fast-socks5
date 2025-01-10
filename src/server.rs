@@ -446,6 +446,46 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn into_inner(self) -> T {
         self.inner
     }
+
+    /// This function is public, it can be call manually on your own-willing
+    /// if config flag has been turned off: `Config::dns_resolve == false`.
+    pub async fn resolve_dns(&mut self) -> Result<()> {
+        trace!("resolving dns");
+        if let Some(target_addr) = self.target_addr.take() {
+            // decide whether we have to resolve DNS or not
+            self.target_addr = match target_addr {
+                TargetAddr::Domain(_, _) => Some(target_addr.resolve_dns().await?),
+                TargetAddr::Ip(_) => Some(target_addr),
+            };
+        }
+
+        Ok(())
+    }
+
+    pub fn target_addr(&self) -> Option<&TargetAddr> {
+        self.target_addr.as_ref()
+    }
+
+    pub fn auth(&self) -> &AuthenticationMethod {
+        &self.auth
+    }
+
+    pub fn cmd(&self) -> &Option<Socks5Command> {
+        &self.cmd
+    }
+
+    /// Borrow the credentials of the user has authenticated with
+    pub fn get_credentials(&self) -> Option<&<<A as Authentication>::Item as Deref>::Target>
+    where
+        <A as Authentication>::Item: Deref,
+    {
+        self.credentials.as_deref()
+    }
+
+    /// Get the credentials of the user has authenticated with
+    pub fn take_credentials(&mut self) -> Option<A::Item> {
+        self.credentials.take()
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> {
@@ -730,48 +770,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         debug!("Request target is {}", target_addr);
 
         Ok((Socks5ServerProtocol::new(self.inner), cmd, target_addr))
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
-    /// This function is public, it can be call manually on your own-willing
-    /// if config flag has been turned off: `Config::dns_resolve == false`.
-    pub async fn resolve_dns(&mut self) -> Result<()> {
-        trace!("resolving dns");
-        if let Some(target_addr) = self.target_addr.take() {
-            // decide whether we have to resolve DNS or not
-            self.target_addr = match target_addr {
-                TargetAddr::Domain(_, _) => Some(target_addr.resolve_dns().await?),
-                TargetAddr::Ip(_) => Some(target_addr),
-            };
-        }
-
-        Ok(())
-    }
-
-    pub fn target_addr(&self) -> Option<&TargetAddr> {
-        self.target_addr.as_ref()
-    }
-
-    pub fn auth(&self) -> &AuthenticationMethod {
-        &self.auth
-    }
-
-    pub fn cmd(&self) -> &Option<Socks5Command> {
-        &self.cmd
-    }
-
-    /// Borrow the credentials of the user has authenticated with
-    pub fn get_credentials(&self) -> Option<&<<A as Authentication>::Item as Deref>::Target>
-    where
-        <A as Authentication>::Item: Deref,
-    {
-        self.credentials.as_deref()
-    }
-
-    /// Get the credentials of the user has authenticated with
-    pub fn take_credentials(&mut self) -> Option<A::Item> {
-        self.credentials.take()
     }
 }
 

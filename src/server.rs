@@ -651,7 +651,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMeth
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
     /// Reply success to the client according to the RFC.
     /// This consumes the wrapper as after this message actual proxying should begin.
-    async fn reply_success(mut self, sock_addr: SocketAddr) -> Result<T> {
+    pub async fn reply_success(mut self, sock_addr: SocketAddr) -> Result<T> {
         self.inner
             .write(&new_reply(&ReplyError::Succeeded, sock_addr))
             .await
@@ -664,7 +664,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandR
     }
 
     /// Reply error to the client with the reply code according to the RFC.
-    async fn reply_error(mut self, error: &ReplyError) -> Result<()> {
+    pub async fn reply_error(mut self, error: &ReplyError) -> Result<()> {
         let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
         debug!("reply error to be written: {:?}", &reply);
 
@@ -694,7 +694,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
     ///
     /// It the request is correct, it should returns a ['SocketAddr'].
     ///
-    async fn read_command(
+    pub async fn read_command(
         mut self,
     ) -> Result<(
         Socks5ServerProtocol<T, states::CommandRead>,
@@ -775,9 +775,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     }
 }
 
-/// Copy data between two peers
+/// Run a bidirectional proxy between two streams.
 /// Using 2 different generators, because they could be different structs with same traits.
-async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
+pub async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Unpin,
     O: AsyncRead + AsyncWrite + Unpin,
@@ -832,7 +832,8 @@ async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Resul
     }
 }
 
-async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
+/// Run a bidirectional UDP SOCKS proxy for a bound port.
+pub async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
     let outbound = UdpSocket::bind("[::]:0").await?;
 
     let req_fut = handle_udp_request(&inbound, &outbound);

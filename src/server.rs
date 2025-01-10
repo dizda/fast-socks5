@@ -277,6 +277,8 @@ pub mod states {
     pub struct Opened;
     pub struct AuthMethodsRead;
     pub struct AuthMethodChosen;
+    pub struct Authenticated;
+    pub struct CommandRead;
 }
 
 pub struct Socks5ServerProtocol<T, S> {
@@ -333,7 +335,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         trace!("upgrading to socks5...");
 
         // Handshake
-        if !self.config.skip_auth {
+        let proto = if !self.config.skip_auth {
             let (proto, methods) = Socks5ServerProtocol::start(self.inner)
                 .get_methods()
                 .await?;
@@ -343,28 +345,54 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                 .await?;
 
             if self.config.auth.is_some() {
-                let (inner, credentials) = proto
+                let (proto, credentials) = proto
                     .authenticate(auth_method, self.config.as_ref())
                     .await?;
-                self.inner = inner;
                 self.credentials = Some(credentials);
+                proto
             } else {
-                self.inner = proto.inner;
+                Socks5ServerProtocol::new(proto.inner)
             }
         } else {
             debug!("skipping auth");
+            Socks5ServerProtocol::new(self.inner)
+        };
+
+        let (proto, cmd, target_addr) = proto.read_command().await?;
+        self.cmd = Some(match cmd {
+            Socks5Command::UDPAssociate if !self.config.allow_udp => {
+                proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                return Err(ReplyError::CommandNotSupported.into());
+            }
+            Socks5Command::TCPBind => {
+                proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                return Err(ReplyError::CommandNotSupported.into());
+            }
+            c => c,
+        });
+        self.target_addr = Some(target_addr);
+        self.inner = proto.inner;
+
+        if self.config.dns_resolve {
+            self.resolve_dns().await?;
+        } else {
+            debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
         }
 
-        match self.request().await {
-            Ok(_) => {}
-            Err(SocksError::ReplyError(e)) => {
-                // If a reply error has been returned, we send it to the client
-                self.reply_error(&e).await?;
-                return Err(e.into()); // propagate the error to end this connection's task
-            }
-            // if any other errors has been detected, we simply end connection's task
-            Err(d) => return Err(d),
-        };
+        if self.config.execute_command {
+            match self.execute_command().await {
+                Ok(_) => {}
+                Err(SocksError::ReplyError(e)) => {
+                    // If a reply error has been returned, we send it to the client
+                    Socks5ServerProtocol::<T, states::CommandRead>::new(self.inner)
+                        .reply_error(&e)
+                        .await?;
+                    return Err(e.into()); // propagate the error to end this connection's task
+                }
+                // if any other errors has been detected, we simply end connection's task
+                Err(d) => return Err(d),
+            };
+        }
 
         Ok(self)
     }
@@ -537,7 +565,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMeth
         mut self,
         auth_method: u8,
         config: &Config<A>,
-    ) -> Result<(T, A::Item)> {
+    ) -> Result<(Socks5ServerProtocol<T, states::Authenticated>, A::Item)> {
         let credentials = if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
             let credentials = Self::read_username_password(&mut self.inner).await?;
             Some(credentials)
@@ -561,7 +589,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMeth
 
             info!("User logged successfully.");
 
-            return Ok((self.inner, credentials));
+            return Ok((Socks5ServerProtocol::new(self.inner), credentials));
         } else {
             self.inner
                 .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
@@ -575,26 +603,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMeth
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
-    /// Wrapper to principally cover ReplyError types for both functions read & execute request.
-    async fn request(&mut self) -> Result<()> {
-        self.read_command().await?;
-
-        if self.config.dns_resolve {
-            self.resolve_dns().await?;
-        } else {
-            debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
-        }
-
-        if self.config.execute_command {
-            self.execute_command().await?;
-        }
-
-        Ok(())
-    }
-
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
     /// Reply error to the client with the reply code according to the RFC.
-    async fn reply_error(&mut self, error: &ReplyError) -> Result<()> {
+    async fn reply_error(mut self, error: &ReplyError) -> Result<()> {
         let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
         debug!("reply error to be written: {:?}", &reply);
 
@@ -607,7 +618,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
         Ok(())
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenticated> {
     /// Decide to whether or not, accept the authentication method.
     /// Don't forget that the methods list sent by the client, contains one or more methods.
     ///
@@ -622,7 +635,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     ///
     /// It the request is correct, it should returns a ['SocketAddr'].
     ///
-    async fn read_command(&mut self) -> Result<()> {
+    async fn read_command(
+        mut self,
+    ) -> Result<(
+        Socks5ServerProtocol<T, states::CommandRead>,
+        Socks5Command,
+        TargetAddr,
+    )> {
         let [version, cmd, rsv, address_type] =
             read_exact!(self.inner, [0u8; 4]).context("Malformed request")?;
         debug!(
@@ -637,21 +656,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             return Err(SocksError::UnsupportedSocksVersion(version));
         }
 
-        match Socks5Command::from_u8(cmd) {
-            None => return Err(ReplyError::CommandNotSupported.into()),
-            Some(cmd) => match cmd {
-                Socks5Command::TCPConnect => {
-                    self.cmd = Some(cmd);
-                }
-                Socks5Command::UDPAssociate => {
-                    if !self.config.allow_udp {
-                        return Err(ReplyError::CommandNotSupported.into());
-                    }
-                    self.cmd = Some(cmd);
-                }
-                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
-            },
-        }
+        let cmd = Socks5Command::from_u8(cmd).ok_or(ReplyError::CommandNotSupported)?;
 
         // Guess address type
         let target_addr = read_address(&mut self.inner, address_type)
@@ -663,13 +668,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                 ReplyError::AddressTypeNotSupported
             })?;
 
-        self.target_addr = Some(target_addr);
+        debug!("Request target is {}", target_addr);
 
-        debug!("Request target is {}", self.target_addr.as_ref().unwrap());
-
-        Ok(())
+        Ok((Socks5ServerProtocol::new(self.inner), cmd, target_addr))
     }
+}
 
+impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     /// This function is public, it can be call manually on your own-willing
     /// if config flag has been turned off: `Config::dns_resolve == false`.
     pub async fn resolve_dns(&mut self) -> Result<()> {

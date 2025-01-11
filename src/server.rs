@@ -275,8 +275,6 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
 
 pub mod states {
     pub struct Opened;
-    pub struct AuthMethodsRead;
-    pub struct AuthMethodChosen;
     pub struct Authenticated;
     pub struct CommandRead;
 }
@@ -298,6 +296,237 @@ impl<T, S> Socks5ServerProtocol<T, S> {
 impl<T> Socks5ServerProtocol<T, states::Opened> {
     pub fn start(inner: T) -> Self {
         Self::new(inner)
+    }
+}
+
+impl<T> Socks5ServerProtocol<T, states::Authenticated> {
+    pub fn finish_auth<A: AuthMethodSuccessState<T>>(auth: A) -> Self {
+        Self::new(auth.into_inner())
+    }
+
+    pub fn skip_auth_this_is_not_rfc_compliant(inner: T) -> Self {
+        Self::new(inner)
+    }
+}
+
+/// A trait for the final successful state of an authentication method's implementation.
+///
+/// This allows `Socks5ServerProtocol<T, states::Authenticated>::finish_authentication` to
+/// let the user continue with the protocol after the socket has been handed off to the
+/// authentication method.
+pub trait AuthMethodSuccessState<T> {
+    fn into_inner(self) -> T;
+
+    fn finish_auth(self) -> Socks5ServerProtocol<T, states::Authenticated>
+    where
+        Self: Sized,
+    {
+        Socks5ServerProtocol::finish_auth(self)
+    }
+}
+
+/// A metadata trait for authentication methods, essentially binding an ID value
+/// (as used in the method negotiation) to an actual implementation of the method.
+///
+/// Use blank structs for individual protocol implementations and
+/// enums for sets of supported protocols (you'll need a matching enum for the `Impl`).
+pub trait AuthMethod<T>: Copy {
+    type StartingState;
+    fn method_id(self) -> u8;
+    fn new(self, inner: T) -> Self::StartingState;
+}
+
+pub struct NoAuthenticationImpl<T>(T);
+
+impl<T> AuthMethodSuccessState<T> for NoAuthenticationImpl<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// The "NO AUTHENTICATION REQUIRED" auth method, ID 00h as specifed by RFC 1928.
+///
+/// As the dummy no-auth method, it only has one state. Once it's been negotiated,
+/// you can immediately continue with `finish_authentication`.
+///
+/// Or not so immediately: if you want to use no-authentication with e.g. IP address
+/// allowlisting or TLS client certificate auth for TLS-wrapped SOCKS5, this is your
+/// opportunity to reject the no-authentication by dropping the connection!
+#[derive(Debug, Clone, Copy)]
+pub struct NoAuthentication;
+
+impl<T> AuthMethod<T> for NoAuthentication {
+    type StartingState = NoAuthenticationImpl<T>;
+
+    fn method_id(self) -> u8 {
+        0x00
+    }
+
+    fn new(self, inner: T) -> Self::StartingState {
+        NoAuthenticationImpl(inner)
+    }
+}
+
+mod password_states {
+    pub struct Started;
+    pub struct Received;
+    pub struct Finished;
+}
+
+pub struct PasswordAuthenticationImpl<T, S> {
+    inner: T,
+    _state: PhantomData<S>,
+}
+
+impl<T, S> PasswordAuthenticationImpl<T, S> {
+    fn new(inner: T) -> Self {
+        PasswordAuthenticationImpl {
+            inner,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Started> {
+    pub async fn read_username_password(
+        self,
+    ) -> Result<(
+        String,
+        String,
+        PasswordAuthenticationImpl<T, password_states::Received>,
+    )> {
+        let mut socket = self.inner;
+        trace!("PasswordAuthenticationStarted: read_username_password()");
+        let [version, user_len] = read_exact!(socket, [0u8; 2]).context("Can't read user len")?;
+        debug!(
+            "Auth: [version: {version}, user len: {len}]",
+            version = version,
+            len = user_len,
+        );
+
+        if user_len < 1 {
+            return Err(SocksError::AuthenticationFailed(format!(
+                "Username malformed ({} chars)",
+                user_len
+            )));
+        }
+
+        let username =
+            read_exact!(socket, vec![0u8; user_len as usize]).context("Can't get username.")?;
+        debug!("username bytes: {:?}", &username);
+
+        let [pass_len] = read_exact!(socket, [0u8; 1]).context("Can't read pass len")?;
+        debug!("Auth: [pass len: {len}]", len = pass_len,);
+
+        if pass_len < 1 {
+            return Err(SocksError::AuthenticationFailed(format!(
+                "Password malformed ({} chars)",
+                pass_len
+            )));
+        }
+
+        let password =
+            read_exact!(socket, vec![0u8; pass_len as usize]).context("Can't get password.")?;
+        debug!("password bytes: {:?}", &password);
+
+        let username = String::from_utf8(username).context("Failed to convert username")?;
+        let password = String::from_utf8(password).context("Failed to convert password")?;
+
+        Ok((username, password, PasswordAuthenticationImpl::new(socket)))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Received> {
+    pub async fn accept(
+        mut self,
+    ) -> Result<PasswordAuthenticationImpl<T, password_states::Finished>> {
+        self.inner
+            .write_all(&[1, consts::SOCKS5_REPLY_SUCCEEDED])
+            .await
+            .context("Can't reply auth success")?;
+
+        info!("Password authentication accepted.");
+        Ok(PasswordAuthenticationImpl::new(self.inner))
+    }
+
+    pub async fn reject(mut self) -> Result<()> {
+        self.inner
+            .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
+            .await
+            .context("Can't reply with auth method not acceptable.")?;
+
+        info!("Password authentication rejected.");
+        Ok(())
+    }
+}
+
+impl<T> AuthMethodSuccessState<T> for PasswordAuthenticationImpl<T, password_states::Finished> {
+    fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+/// The "USERNAME/PASSWORD" auth method, ID 02h as specified by RFC 1928.
+#[derive(Debug, Clone, Copy)]
+pub struct PasswordAuthentication;
+
+impl<T> AuthMethod<T> for PasswordAuthentication {
+    type StartingState = PasswordAuthenticationImpl<T, password_states::Started>;
+
+    fn method_id(self) -> u8 {
+        0x02
+    }
+
+    fn new(self, inner: T) -> Self::StartingState {
+        PasswordAuthenticationImpl::new(inner)
+    }
+}
+
+#[macro_export]
+macro_rules! auth_method_enums {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $enum:ident / $(#[$state_enum_meta:meta])* $state_enum:ident<$state_enum_par:ident> {
+            $($method:ident($state:ty)),+ $(,)?
+        }
+    ) => {
+        $(#[$state_enum_meta])*
+        $vis enum $state_enum<$state_enum_par> {
+            $($method($state)),+
+        }
+
+        #[derive(Clone, Copy)]
+        $(#[$enum_meta])*
+        $vis enum $enum {
+            $($method($method)),+
+        }
+
+        impl<T> AuthMethod<T> for $enum {
+            type StartingState = $state_enum<T>;
+
+            fn method_id(self) -> u8 {
+                match self {
+                    $($enum::$method(auth) => AuthMethod::<T>::method_id(auth)),+
+                }
+            }
+
+            fn new(self, inner: T) -> Self::StartingState {
+                match self {
+                    $($enum::$method(auth) => $state_enum::$method(auth.new(inner))),+
+                }
+            }
+        }
+    };
+}
+
+auth_method_enums! {
+    /// The combination of all authentication methods supported by this crate out of the box,
+    /// as an enum appropriate for static dispatch.
+    ///
+    /// If you want to add your own custom methods, you can generate a similar enum using the `auth_method_enums` macro.
+    pub enum StandardAuthentication / StandardAuthenticationStarted<T> {
+        NoAuthentication(NoAuthenticationImpl<T>),
+        PasswordAuthentication(PasswordAuthenticationImpl<T, password_states::Started>),
     }
 }
 
@@ -334,28 +563,57 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A>> {
         trace!("upgrading to socks5...");
 
+        // NOTE: this cannot be split into smaller methods without making self.inner an Option
+
         // Handshake
         let proto = if !self.config.skip_auth {
-            let (proto, methods) = Socks5ServerProtocol::start(self.inner)
-                .get_methods()
-                .await?;
-
-            let (proto, auth_method) = proto
-                .can_accept_method(methods, self.config.as_ref())
-                .await?;
-
-            if self.config.auth.is_some() {
-                let (proto, credentials) = proto
-                    .authenticate(auth_method, self.config.as_ref())
+            if let Some(auth_callback) = self.config.auth.as_ref() {
+                let auth = Socks5ServerProtocol::start(self.inner)
+                    .negotiate_auth(if self.config.allow_no_auth {
+                        &[
+                            StandardAuthentication::PasswordAuthentication(PasswordAuthentication),
+                            StandardAuthentication::NoAuthentication(NoAuthentication),
+                        ]
+                    } else {
+                        &[StandardAuthentication::PasswordAuthentication(
+                            PasswordAuthentication,
+                        )]
+                    })
                     .await?;
-                self.credentials = Some(credentials);
-                proto
+                match auth {
+                    StandardAuthenticationStarted::NoAuthentication(auth) => {
+                        self.credentials = auth_callback.authenticate(None).await;
+                        if self.credentials.is_some() {
+                            auth.finish_auth()
+                        } else {
+                            return Err(SocksError::AuthenticationRejected(format!(
+                                "Authentication, rejected."
+                            )));
+                        }
+                    }
+                    StandardAuthenticationStarted::PasswordAuthentication(auth) => {
+                        let (username, password, auth) = auth.read_username_password().await?;
+                        self.credentials =
+                            auth_callback.authenticate(Some((username, password))).await;
+                        if self.credentials.is_some() {
+                            auth.accept().await?.finish_auth()
+                        } else {
+                            auth.reject().await?;
+                            return Err(SocksError::AuthenticationRejected(format!(
+                                "Authentication, rejected."
+                            )));
+                        }
+                    }
+                }
             } else {
-                Socks5ServerProtocol::new(proto.inner)
+                Socks5ServerProtocol::start(self.inner)
+                    .negotiate_auth(&[NoAuthentication])
+                    .await?
+                    .finish_auth()
             }
         } else {
             debug!("skipping auth");
-            Socks5ServerProtocol::new(self.inner)
+            Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(self.inner)
         };
 
         let (proto, cmd, target_addr) = proto.read_command().await?;
@@ -489,27 +747,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> {
-    /// Read the authentication method provided by the client.
-    /// A client send a list of methods that he supports, he could send
+    /// Negotiate an authentication method from a list of supported ones and initialize it.
     ///
-    ///   - 0: Non auth
-    ///   - 2: Auth with username/password
+    /// Internally, this reads the list of authentication methods provided by the client, and
+    /// picks the first one for which there exists an implementation in `server_methods`.
     ///
-    /// Altogether, then the server choose to use of of these,
-    /// or deny the handshake (thus the connection).
-    ///
-    /// # Examples
-    /// ```text
-    ///                    {SOCKS Version, methods-length}
-    ///     eg. (non-auth) {5, 2}
-    ///     eg. (auth)     {5, 3}
-    /// ```
-    ///
-    async fn get_methods(
+    /// If none of the auth methods requested by the client are in `server_methods`,
+    /// returns a `SocksError::AuthMethodUnacceptable`.
+    pub async fn negotiate_auth<M: AuthMethod<T>>(
         mut self,
-    ) -> Result<(Socks5ServerProtocol<T, states::AuthMethodsRead>, Vec<u8>)> {
-        trace!("Socks5Socket: get_methods()");
-        // read the first 2 bytes which contains the SOCKS version and the methods len()
+        server_methods: &[M],
+    ) -> Result<M::StartingState> {
+        trace!("Socks5ServerProtocol: negotiate_auth()");
         let [version, methods_len] =
             read_exact!(self.inner, [0u8; 2]).context("Can't read methods")?;
         debug!(
@@ -529,162 +778,28 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> 
             .context("Can't get methods.")?;
         debug!("methods supported sent by the client: {:?}", &methods);
 
-        // Return methods available
-        Ok((Socks5ServerProtocol::new(self.inner), methods))
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMethodsRead> {
-    /// Decide to whether or not, accept the authentication method.
-    /// Don't forget that the methods list sent by the client, contains one or more methods.
-    ///
-    /// # Request
-    ///
-    ///  Client send an array of 3 entries: [0, 1, 2]
-    /// ```text
-    ///                          {SOCKS Version,  Authentication chosen}
-    ///     eg. (non-auth)       {5, 0}
-    ///     eg. (GSSAPI)         {5, 1}
-    ///     eg. (auth)           {5, 2}
-    /// ```
-    ///
-    /// # Response
-    /// ```text
-    ///     eg. (accept non-auth) {5, 0x00}
-    ///     eg. (non-acceptable)  {5, 0xff}
-    /// ```
-    ///
-    async fn can_accept_method<A: Authentication>(
-        mut self,
-        client_methods: Vec<u8>,
-        config: &Config<A>,
-    ) -> Result<(Socks5ServerProtocol<T, states::AuthMethodChosen>, u8)> {
-        let method_supported;
-
-        if let Some(_auth) = config.auth.as_ref() {
-            if client_methods.contains(&consts::SOCKS5_AUTH_METHOD_PASSWORD) {
-                // can auth with password
-                method_supported = consts::SOCKS5_AUTH_METHOD_PASSWORD;
-            } else {
-                // client hasn't provided a password
-                if config.allow_no_auth {
-                    // but we allow no auth, for ip whitelisting
-                    method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
-                } else {
-                    // we don't allow no auth, so we deny the entry
-                    debug!("Don't support this auth method, reply with (0xff)");
+        for client_method_id in methods.iter() {
+            for server_method in server_methods {
+                if server_method.method_id() == *client_method_id {
+                    debug!("Reply with method {}", *client_method_id);
                     self.inner
-                        .write_all(&[
-                            consts::SOCKS5_VERSION,
-                            consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
-                        ])
+                        .write_all(&[consts::SOCKS5_VERSION, *client_method_id])
                         .await
-                        .context("Can't reply with method not acceptable.")?;
-
-                    return Err(SocksError::AuthMethodUnacceptable(client_methods));
+                        .context("Can't reply with auth method")?;
+                    return Ok(server_method.new(self.inner));
                 }
             }
-        } else {
-            method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
         }
 
-        debug!(
-            "Reply with method {} ({})",
-            AuthenticationMethod::from_u8(method_supported).context("Method not supported")?,
-            method_supported
-        );
+        debug!("No auth method supported by both client and server, reply with (0xff)");
         self.inner
-            .write(&[consts::SOCKS5_VERSION, method_supported])
+            .write_all(&[
+                consts::SOCKS5_VERSION,
+                consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
+            ])
             .await
-            .context("Can't reply with method auth-none")?;
-        Ok((Socks5ServerProtocol::new(self.inner), method_supported))
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::AuthMethodChosen> {
-    async fn read_username_password(socket: &mut T) -> Result<(String, String)> {
-        trace!("Socks5Socket: authenticate()");
-        let [version, user_len] = read_exact!(socket, [0u8; 2]).context("Can't read user len")?;
-        debug!(
-            "Auth: [version: {version}, user len: {len}]",
-            version = version,
-            len = user_len,
-        );
-
-        if user_len < 1 {
-            return Err(SocksError::AuthenticationFailed(format!(
-                "Username malformed ({} chars)",
-                user_len
-            )));
-        }
-
-        let username =
-            read_exact!(socket, vec![0u8; user_len as usize]).context("Can't get username.")?;
-        debug!("username bytes: {:?}", &username);
-
-        let [pass_len] = read_exact!(socket, [0u8; 1]).context("Can't read pass len")?;
-        debug!("Auth: [pass len: {len}]", len = pass_len,);
-
-        if pass_len < 1 {
-            return Err(SocksError::AuthenticationFailed(format!(
-                "Password malformed ({} chars)",
-                pass_len
-            )));
-        }
-
-        let password =
-            read_exact!(socket, vec![0u8; pass_len as usize]).context("Can't get password.")?;
-        debug!("password bytes: {:?}", &password);
-
-        let username = String::from_utf8(username).context("Failed to convert username")?;
-        let password = String::from_utf8(password).context("Failed to convert password")?;
-
-        Ok((username, password))
-    }
-
-    /// Only called if
-    ///  - this server has `Authentication` trait implemented.
-    ///  - and the client supports authentication via username/password
-    ///  - or the client doesn't send authentication, but we let the trait decides if the `allow_no_auth()` set as `true`
-    async fn authenticate<A: Authentication>(
-        mut self,
-        auth_method: u8,
-        config: &Config<A>,
-    ) -> Result<(Socks5ServerProtocol<T, states::Authenticated>, A::Item)> {
-        let credentials = if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
-            let credentials = Self::read_username_password(&mut self.inner).await?;
-            Some(credentials)
-        } else {
-            // the client hasn't provided any credentials, the function auth.authenticate()
-            // will then check None, according to other parameters provided by the trait
-            // such as IP, etc.
-            None
-        };
-
-        let auth = config.auth.as_ref().context("No auth module")?;
-
-        if let Some(credentials) = auth.authenticate(credentials).await {
-            if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
-                // only the password way expect to write a response at this moment
-                self.inner
-                    .write_all(&[1, consts::SOCKS5_REPLY_SUCCEEDED])
-                    .await
-                    .context("Can't reply auth success")?;
-            }
-
-            info!("User logged successfully.");
-
-            return Ok((Socks5ServerProtocol::new(self.inner), credentials));
-        } else {
-            self.inner
-                .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
-                .await
-                .context("Can't reply with auth method not acceptable.")?;
-
-            return Err(SocksError::AuthenticationRejected(format!(
-                "Authentication, rejected."
-            )));
-        }
+            .context("Can't reply with method not acceptable.")?;
+        Err(SocksError::AuthMethodUnacceptable(methods))
     }
 }
 

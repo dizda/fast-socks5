@@ -336,6 +336,36 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     pub fn skip_auth_this_is_not_rfc_compliant(inner: T) -> Self {
         Self::new(inner)
     }
+
+    pub async fn accept_no_auth(inner: T) -> Result<Self>
+    where
+        T: AsyncWrite + AsyncRead + Unpin,
+    {
+        Ok(Socks5ServerProtocol::start(inner)
+            .negotiate_auth(&[NoAuthentication])
+            .await?
+            .finish_auth())
+    }
+
+    pub async fn accept_password_auth<F>(inner: T, mut check: F) -> Result<Self>
+    where
+        T: AsyncWrite + AsyncRead + Unpin,
+        F: FnMut(String, String) -> bool,
+    {
+        let (user, pass, auth) = Socks5ServerProtocol::start(inner)
+            .negotiate_auth(&[PasswordAuthentication])
+            .await?
+            .read_username_password()
+            .await?;
+        if check(user, pass) {
+            Ok(auth.accept().await?.finish_auth())
+        } else {
+            auth.reject().await?;
+            Err(SocksError::AuthenticationRejected(
+                "Wrong username/password".to_owned(),
+            ))
+        }
+    }
 }
 
 /// A trait for the final successful state of an authentication method's implementation.

@@ -327,14 +327,10 @@ mod test {
         sync::oneshot::Sender,
     };
 
-    use crate::{
-        client,
-        server::{self, SimpleUserPassword},
-    };
+    use crate::{client, server, ReplyError, Socks5Command};
     use std::{
         net::{SocketAddr, ToSocketAddrs},
         num::ParseIntError,
-        sync::Arc,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
@@ -344,27 +340,28 @@ mod test {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
-    async fn setup_socks_server(
-        proxy_addr: &str,
-        auth: Option<SimpleUserPassword>,
-        tx: Sender<SocketAddr>,
-    ) -> Result<()> {
-        let mut config = server::Config::default();
-        config.set_udp_support(true);
-        let config = match auth {
-            None => config,
-            Some(up) => config.with_authentication(up),
-        };
+    async fn setup_socks_server(proxy_addr: &str, tx: Sender<SocketAddr>) -> Result<()> {
+        let reply_ip = proxy_addr.parse::<SocketAddr>().unwrap().ip();
 
-        let config = Arc::new(config);
         let listener = TcpListener::bind(proxy_addr).await?;
         tx.send(listener.local_addr()?).unwrap();
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let mut socks5_socket = server::Socks5Socket::new(stream, config.clone());
-            socks5_socket.set_reply_ip(proxy_addr.parse::<SocketAddr>().unwrap().ip());
 
-            socks5_socket.upgrade_to_socks5().await?;
+        loop {
+            let (stream, _) = listener.accept().await?; // NOTE: not spawning for test
+            let proto = server::Socks5ServerProtocol::accept_no_auth(stream).await?;
+            let (proto, cmd, mut target_addr) = proto.read_command().await?;
+            target_addr = target_addr.resolve_dns().await?;
+            match cmd {
+                Socks5Command::TCPConnect => {
+                    server::run_tcp_proxy(proto, &target_addr, 10, false).await?;
+                }
+                Socks5Command::UDPAssociate => {
+                    server::run_udp_proxy(proto, &target_addr, reply_ip).await?;
+                }
+                Socks5Command::TCPBind => {
+                    proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                }
+            }
         }
     }
 
@@ -385,7 +382,7 @@ mod test {
         init();
         block_on(async {
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
 
             let socket = client::Socks5Stream::connect(
                 rx.await.unwrap(),
@@ -406,7 +403,7 @@ mod test {
             const MOCK_ADDRESS: &str = "[::1]:40235";
 
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
             // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
@@ -449,7 +446,7 @@ mod test {
             const DNS_SERVER: &str = "1.1.1.1:53";
 
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
             // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the

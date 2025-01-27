@@ -217,11 +217,16 @@ impl<A: Authentication> Config<A> {
 
 /// Wrapper of TcpListener
 /// Useful if you don't use any existing TcpListener's streams.
+#[deprecated(
+    since = "0.11.0",
+    note = "Use the new explicit API instead, see examples/server.rs"
+)]
 pub struct Socks5Server<A: Authentication = DenyAuthentication> {
     listener: TcpListener,
     config: Arc<Config<A>>,
 }
 
+#[allow(deprecated)]
 impl<A: Authentication + Default> Socks5Server<A> {
     pub async fn bind<S: AsyncToSocketAddrs>(addr: S) -> io::Result<Self> {
         let listener = TcpListener::bind(&addr).await?;
@@ -231,6 +236,7 @@ impl<A: Authentication + Default> Socks5Server<A> {
     }
 }
 
+#[allow(deprecated)]
 impl<A: Authentication> Socks5Server<A> {
     /// Set a custom config
     pub fn with_config<T: Authentication>(self, config: Config<T>) -> Socks5Server<T> {
@@ -249,6 +255,7 @@ impl<A: Authentication> Socks5Server<A> {
 /// `Incoming` implements [`futures_core::stream::Stream`].
 ///
 /// [`futures_core::stream::Stream`]: https://docs.rs/futures/0.3.30/futures/stream/trait.Stream.html
+#[allow(deprecated)]
 pub struct Incoming<'a, A: Authentication>(
     &'a Socks5Server<A>,
     Option<Pin<Box<dyn Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send + Sync + 'a>>>,
@@ -256,6 +263,7 @@ pub struct Incoming<'a, A: Authentication>(
 
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
+#[allow(deprecated)]
 impl<'a, A: Authentication> Stream for Incoming<'a, A> {
     type Item = Result<Socks5Socket<TcpStream, A>>;
 
@@ -289,6 +297,10 @@ impl<'a, A: Authentication> Stream for Incoming<'a, A> {
 }
 
 /// Wrap TcpStream and contains Socks5 protocol implementation.
+#[deprecated(
+    since = "0.11.0",
+    note = "Use the new explicit API instead, see examples/server.rs"
+)]
 pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
     inner: T,
     config: Arc<Config<A>>,
@@ -604,6 +616,7 @@ impl StandardAuthentication {
     }
 }
 
+#[allow(deprecated)]
 impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn new(socket: T, config: Arc<Config<A>>) -> Self {
         Socks5Socket {
@@ -1014,9 +1027,11 @@ pub async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"
 //
 // cf. https://users.rust-lang.org/t/take-in-impl-future-cannot-borrow-data-in-a-dereference-of-pin/52042
+#[allow(deprecated)]
 impl<T, A: Authentication> Unpin for Socks5Socket<T, A> where T: AsyncRead + AsyncWrite + Unpin {}
 
 /// Allow us to read directly from the struct
+#[allow(deprecated)]
 impl<T, A: Authentication> AsyncRead for Socks5Socket<T, A>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -1031,6 +1046,7 @@ where
 }
 
 /// Allow us to write directly into the struct
+#[allow(deprecated)]
 impl<T, A: Authentication> AsyncWrite for Socks5Socket<T, A>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -1086,6 +1102,7 @@ fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use crate::server::Socks5Server;
     use tokio_test::block_on;

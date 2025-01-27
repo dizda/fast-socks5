@@ -67,6 +67,35 @@ pub trait Authentication: Send + Sync {
     async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item>;
 }
 
+async fn authenticate_callback<T: AsyncRead + AsyncWrite + Unpin, A: Authentication>(
+    auth_callback: &A,
+    auth: StandardAuthenticationStarted<T>,
+) -> Result<(Socks5ServerProtocol<T, states::Authenticated>, A::Item)> {
+    match auth {
+        StandardAuthenticationStarted::NoAuthentication(auth) => {
+            if let Some(credentials) = auth_callback.authenticate(None).await {
+                Ok((auth.finish_auth(), credentials))
+            } else {
+                Err(SocksError::AuthenticationRejected(format!(
+                    "Authentication, rejected."
+                )))
+            }
+        }
+        StandardAuthenticationStarted::PasswordAuthentication(auth) => {
+            let (username, password, auth) = auth.read_username_password().await?;
+            if let Some(credentials) = auth_callback.authenticate(Some((username, password))).await
+            {
+                Ok((auth.accept().await?.finish_auth(), credentials))
+            } else {
+                auth.reject().await?;
+                Err(SocksError::AuthenticationRejected(format!(
+                    "Authentication, rejected."
+                )))
+            }
+        }
+    }
+}
+
 /// Basic user/pass auth method provided.
 pub struct SimpleUserPassword {
     pub username: String,
@@ -530,6 +559,21 @@ auth_method_enums! {
     }
 }
 
+impl StandardAuthentication {
+    pub fn allow_no_auth(allow: bool) -> &'static [StandardAuthentication] {
+        if allow {
+            &[
+                StandardAuthentication::PasswordAuthentication(PasswordAuthentication),
+                StandardAuthentication::NoAuthentication(NoAuthentication),
+            ]
+        } else {
+            &[StandardAuthentication::PasswordAuthentication(
+                PasswordAuthentication,
+            )]
+        }
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn new(socket: T, config: Arc<Config<A>>) -> Self {
         Socks5Socket {
@@ -563,140 +607,66 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A>> {
         trace!("upgrading to socks5...");
 
-        // NOTE: this cannot be split into smaller methods without making self.inner an Option
+        // NOTE: this cannot be split in two without making self.inner an Option
 
         // Handshake
-        let proto = if !self.config.skip_auth {
-            if let Some(auth_callback) = self.config.auth.as_ref() {
-                let auth = Socks5ServerProtocol::start(self.inner)
-                    .negotiate_auth(if self.config.allow_no_auth {
-                        &[
-                            StandardAuthentication::PasswordAuthentication(PasswordAuthentication),
-                            StandardAuthentication::NoAuthentication(NoAuthentication),
-                        ]
-                    } else {
-                        &[StandardAuthentication::PasswordAuthentication(
-                            PasswordAuthentication,
-                        )]
-                    })
-                    .await?;
-                match auth {
-                    StandardAuthenticationStarted::NoAuthentication(auth) => {
-                        self.credentials = auth_callback.authenticate(None).await;
-                        if self.credentials.is_some() {
-                            auth.finish_auth()
-                        } else {
-                            return Err(SocksError::AuthenticationRejected(format!(
-                                "Authentication, rejected."
-                            )));
-                        }
-                    }
-                    StandardAuthenticationStarted::PasswordAuthentication(auth) => {
-                        let (username, password, auth) = auth.read_username_password().await?;
-                        self.credentials =
-                            auth_callback.authenticate(Some((username, password))).await;
-                        if self.credentials.is_some() {
-                            auth.accept().await?.finish_auth()
-                        } else {
-                            auth.reject().await?;
-                            return Err(SocksError::AuthenticationRejected(format!(
-                                "Authentication, rejected."
-                            )));
-                        }
-                    }
-                }
-            } else {
-                Socks5ServerProtocol::start(self.inner)
-                    .negotiate_auth(&[NoAuthentication])
-                    .await?
-                    .finish_auth()
+        let proto = match self.config.auth.as_ref() {
+            _ if self.config.skip_auth => {
+                debug!("skipping auth");
+                Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(self.inner)
             }
-        } else {
-            debug!("skipping auth");
-            Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(self.inner)
+            None => Socks5ServerProtocol::start(self.inner)
+                .negotiate_auth(&[NoAuthentication])
+                .await?
+                .finish_auth(),
+            Some(auth_callback) => {
+                let methods = StandardAuthentication::allow_no_auth(self.config.allow_no_auth);
+                let auth = Socks5ServerProtocol::start(self.inner)
+                    .negotiate_auth(methods)
+                    .await?;
+                let (proto, creds) = authenticate_callback(auth_callback.as_ref(), auth).await?;
+                self.credentials = Some(creds);
+                proto
+            }
         };
 
-        let (proto, cmd, target_addr) = proto.read_command().await?;
-        self.cmd = Some(cmd);
-        self.target_addr = Some(target_addr);
+        let (proto, cmd, mut target_addr) = proto.read_command().await?;
 
         if self.config.dns_resolve {
-            if let Some(addr) = self.target_addr {
-                self.target_addr = Some(addr.resolve_dns().await?);
-            }
+            target_addr = target_addr.resolve_dns().await?;
         } else {
             debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
         }
 
-        if self.config.execute_command {
-            /* we've just set it to Some above.
-             * also, not gonna be used externally since we execute it here */
-            let cmd = self.cmd.take().unwrap();
+        match cmd {
+            cmd if !self.config.execute_command => {
+                self.cmd = Some(cmd);
+                self.inner = proto.inner;
+            }
+            Socks5Command::TCPConnect => {
+                self.inner = run_tcp_proxy(
+                    proto,
+                    &target_addr,
+                    self.config.request_timeout,
+                    self.config.nodelay,
+                )
+                .await?;
+            }
+            Socks5Command::UDPAssociate if self.config.allow_udp => {
+                self.inner = run_udp_proxy(
+                    proto,
+                    &target_addr,
+                    self.reply_ip.context("invalid reply ip")?,
+                )
+                .await?;
+            }
+            _ => {
+                proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                return Err(ReplyError::CommandNotSupported.into());
+            }
+        };
 
-            match cmd {
-                Socks5Command::TCPBind => {
-                    proto.reply_error(&ReplyError::CommandNotSupported).await?;
-                    return Err(ReplyError::CommandNotSupported.into());
-                }
-                Socks5Command::TCPConnect => {
-                    let addr = self
-                        .target_addr
-                        .as_ref()
-                        .context("target_addr empty")?
-                        .to_socket_addrs()?
-                        .next()
-                        .context("unreachable")?;
-
-                    // TCP connect with timeout, to avoid memory leak for connection that takes forever
-                    let outbound =
-                        tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
-
-                    // Disable Nagle's algorithm if config specifies to do so.
-                    outbound.set_nodelay(self.config.nodelay)?;
-
-                    debug!("Connected to remote destination");
-
-                    let mut inner = proto
-                        .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
-                        .await?;
-
-                    transfer(&mut inner, outbound).await?;
-                    self.inner = inner;
-                }
-                Socks5Command::UDPAssociate => {
-                    if self.config.allow_udp {
-                        // The DST.ADDR and DST.PORT fields contain the address and port that
-                        // the client expects to use to send UDP datagrams on for the
-                        // association. The server MAY use this information to limit access
-                        // to the association.
-                        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
-                        //
-                        // We do NOT limit the access from the client currently in this implementation.
-                        let _not_used = self.target_addr.as_ref();
-
-                        // Listen with UDP6 socket, so the client can connect to it with either
-                        // IPv4 or IPv6.
-                        let peer_sock = UdpSocket::bind("[::]:0").await?;
-
-                        // Respect the pre-populated reply IP address.
-                        self.inner = proto
-                            .reply_success(SocketAddr::new(
-                                self.reply_ip.context("invalid reply ip")?,
-                                peer_sock.local_addr()?.port(),
-                            ))
-                            .await?;
-
-                        transfer_udp(peer_sock).await?;
-                    } else {
-                        proto.reply_error(&ReplyError::CommandNotSupported).await?;
-                        return Err(ReplyError::CommandNotSupported.into());
-                    }
-                }
-            };
-        } else {
-            self.inner = proto.inner;
-        }
-
+        self.target_addr = Some(target_addr); /* legacy API leaves it exported */
         Ok(self)
     }
 
@@ -886,6 +856,58 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
 
         Ok((Socks5ServerProtocol::new(self.inner), cmd, target_addr))
     }
+}
+
+/// Handle the connect command by running a TCP proxy until the connection is done.
+pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    addr: &TargetAddr,
+    request_timeout_s: u64,
+    nodelay: bool,
+) -> Result<T> {
+    let addr = addr.to_socket_addrs()?.next().context("unreachable")?;
+
+    // TCP connect with timeout, to avoid memory leak for connection that takes forever
+    let outbound = tcp_connect_with_timeout(addr, request_timeout_s).await?;
+
+    // Disable Nagle's algorithm if config specifies to do so.
+    outbound.set_nodelay(nodelay)?;
+
+    debug!("Connected to remote destination");
+
+    let mut inner = proto
+        .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+        .await?;
+
+    transfer(&mut inner, outbound).await?;
+    Ok(inner)
+}
+
+/// Handle the associate command by running a UDP proxy until the connection is done.
+pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    _addr: &TargetAddr,
+    reply_ip: IpAddr,
+) -> Result<T> {
+    // The DST.ADDR and DST.PORT fields contain the address and port that
+    // the client expects to use to send UDP datagrams on for the
+    // association. The server MAY use this information to limit access
+    // to the association.
+    // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+    //
+    // We do NOT limit the access from the client currently in this implementation.
+
+    // Listen with UDP6 socket, so the client can connect to it with either
+    // IPv4 or IPv6.
+    let peer_sock = UdpSocket::bind("[::]:0").await?;
+
+    // Respect the pre-populated reply IP address.
+    let inner = proto
+        .reply_success(SocketAddr::new(reply_ip, peer_sock.local_addr()?.port()))
+        .await?;
+
+    transfer_udp(peer_sock).await?;
+    Ok(inner)
 }
 
 /// Run a bidirectional proxy between two streams.

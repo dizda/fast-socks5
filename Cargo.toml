@@ -44,3 +44,6 @@ name = "server"
 
 [[example]]
 name = "client"
+
+[[example]]
+name = "custom_auth_server"

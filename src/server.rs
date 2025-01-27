@@ -449,6 +449,8 @@ pub struct PasswordAuthenticationImpl<T, S> {
     _state: PhantomData<S>,
 }
 
+pub type PasswordAuthenticationStarted<T> = PasswordAuthenticationImpl<T, password_states::Started>;
+
 impl<T, S> PasswordAuthenticationImpl<T, S> {
     fn new(inner: T) -> Self {
         PasswordAuthenticationImpl {

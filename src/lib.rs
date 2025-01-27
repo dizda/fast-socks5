@@ -8,25 +8,23 @@
 //! - An `async`/`.await` [SOCKS4 Client](https://www.openssh.com/txt/socks4.protocol) implementation.
 //! - An `async`/`.await` [SOCKS4a Client](https://www.openssh.com/txt/socks4a.protocol) implementation.
 //! - No **unsafe** code
-//! - Built on-top of `tokio` library
+//! - Built on top of the [Tokio](https://tokio.rs/) runtime
 //! - Ultra lightweight and scalable
 //! - No system dependencies
 //! - Cross-platform
+//! - Infinitely extensible, explicit server API based on typestates for safety
+//!   - You control the request handling, the library only ensures you follow the proper protocol flow
+//!   - Can skip DNS resolution
+//!   - Can skip the authentication/handshake process (not RFC-compliant, for private use, to save on useless round-trips)
+//!   - Instead of proxying in-process, swap out `run_tcp_proxy` for custom handling to build a router or to use a custom accelerated proxying method
 //! - Authentication methods:
-//!   - No-Auth method
-//!   - Username/Password auth method
-//!   - Custom auth methods can be implemented via the Authentication Trait
-//!   - Credentials returned on authentication success
+//!   - No-Auth method (`0x00`)
+//!   - Username/Password auth method (`0x02`)
+//!   - Custom auth methods can be implemented on the server side via the `AuthMethod` Trait
+//!     - Multiple auth methods with runtime negotiation can be supported, with fast *static* dispatch (enums can be generated with the `auth_method_enums` macro)
+//! - UDP is supported
 //! - All SOCKS5 RFC errors (replies) should be mapped
-//! - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
 //! - `IPv4`, `IPv6`, and `Domains` types are supported
-//! - Config helper for Socks5Server
-//! - Helpers to run a Socks5Server à la *"std's TcpStream"* via `incoming.next().await`
-//! - Examples come with real cases commands scenarios
-//! - Can disable `DNS resolving`
-//! - Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in a current authenticated environment)
-//! - Can disable command execution (useful if you just want to forward the request to a different server)
-//!
 //!
 //! ## Install
 //!

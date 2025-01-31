@@ -335,6 +335,7 @@ impl<T, S> Socks5ServerProtocol<T, S> {
 }
 
 impl<T> Socks5ServerProtocol<T, states::Opened> {
+    /// Start handling the SOCKS5 protocol flow, wrapping a client socket.
     pub fn start(inner: T) -> Self {
         Self::new(inner)
     }
@@ -363,14 +364,21 @@ impl<T, E> CheckResult for Result<T, E> {
 }
 
 impl<T> Socks5ServerProtocol<T, states::Authenticated> {
+    /// Finish handling the authentication method-specific part of the protocol,
+    /// returning back to the overall SOCKS5 flow.
     pub fn finish_auth<A: AuthMethodSuccessState<T>>(auth: A) -> Self {
         Self::new(auth.into_inner())
     }
 
+    /// Wrap a socket in a SOCKS5 flow handler that's already marked as authenticated.
+    ///
+    /// This is not actually part of the official SOCKS5 protocol, but allows you to
+    /// only use the post-authentication subset of it.
     pub fn skip_auth_this_is_not_rfc_compliant(inner: T) -> Self {
         Self::new(inner)
     }
 
+    /// Handle the SOCKS5 auth negotiation supporting only the `NoAuthentication` method.
     pub async fn accept_no_auth(inner: T) -> Result<Self>
     where
         T: AsyncWrite + AsyncRead + Unpin,
@@ -381,6 +389,10 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
             .finish_auth())
     }
 
+    /// Handle the SOCKS5 auth negotiation supporting only the `PasswordAuthentication` method,
+    /// and verify the provided username and password using the provided closure.
+    ///
+    /// The closure can mutate state variables and/or return a result as `Option`/`Result`.
     pub async fn accept_password_auth<F, R>(inner: T, mut check: F) -> Result<(Self, R)>
     where
         T: AsyncWrite + AsyncRead + Unpin,
@@ -485,6 +497,7 @@ impl<T, S> PasswordAuthenticationImpl<T, S> {
 }
 
 impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Started> {
+    /// Handle the username and password sent by the client.
     pub async fn read_username_password(
         self,
     ) -> Result<(
@@ -534,6 +547,7 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
 }
 
 impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Received> {
+    /// Notify the client with a "SUCCEEDED" reply and proceed to finish the authentication.
     pub async fn accept(
         mut self,
     ) -> Result<PasswordAuthenticationImpl<T, password_states::Finished>> {
@@ -546,6 +560,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
         Ok(PasswordAuthenticationImpl::new(self.inner))
     }
 
+    /// Notify the client with a "NOT_ACCEPTABLE" reply and drop the socket.
     pub async fn reject(mut self) -> Result<()> {
         self.inner
             .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
@@ -628,6 +643,7 @@ auth_method_enums! {
 }
 
 impl StandardAuthentication {
+    /// Return a slice containing either both supported methods or only `PasswordAuthentication`.
     pub fn allow_no_auth(allow: bool) -> &'static [StandardAuthentication] {
         if allow {
             &[

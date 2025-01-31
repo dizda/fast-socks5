@@ -607,6 +607,8 @@ impl StandardAuthentication {
     pub fn allow_no_auth(allow: bool) -> &'static [StandardAuthentication] {
         if allow {
             &[
+                // The order of authentication methods can be tested by clients in sequence,
+                // so list more secure or preferred methods first
                 StandardAuthentication::PasswordAuthentication(PasswordAuthentication),
                 StandardAuthentication::NoAuthentication(NoAuthentication),
             ]
@@ -793,8 +795,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> 
             .context("Can't get methods.")?;
         debug!("methods supported sent by the client: {:?}", &methods);
 
-        for client_method_id in methods.iter() {
-            for server_method in server_methods {
+        // server_methods order matter!
+        // the server could choose to prioritize methods
+        for server_method in server_methods {
+            for client_method_id in methods.iter() {
                 if server_method.method_id() == *client_method_id {
                     debug!("Reply with method {}", *client_method_id);
                     self.inner

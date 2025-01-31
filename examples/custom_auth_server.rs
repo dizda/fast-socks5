@@ -22,6 +22,13 @@ use tokio::{
 ///
 /// Listen on a local address:
 ///     `$ RUST_LOG=debug cargo run --example custom_auth_server -- --listen-addr 127.0.0.1:1337`
+///
+/// then try a client to connect to this server:
+///     `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username user --password "correct_horse_battery_staple" -a perdu.com -p 80`
+///
+/// or via a cURL command
+///     `curl -v -s --proxy "socks5://user:correct_horse_battery_staple@127.0.0.1:1337" "https://httpbin.org/get"`
+///
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "socks5-server-custom-auth",
@@ -122,6 +129,8 @@ auth_method_enums! {
 async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
     let proto = match Socks5ServerProtocol::start(socket)
         .negotiate_auth(&[
+            // The order of authentication methods can be tested by clients in sequence,
+            // so list more secure or preferred methods first
             Auth::PasswordAuthentication(PasswordAuthentication),
             Auth::BackdoorAuthentication(BackdoorAuthentication),
         ])
@@ -129,7 +138,8 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
     {
         AuthStarted::PasswordAuthentication(auth) => {
             let (user, pass, auth) = auth.read_username_password().await?;
-            if user == "user" && pass == "correct horse battery staple" {
+            if user == "user" && pass == "correct_horse_battery_staple" {
+                // better to not use spaces for trying out with cURL
                 auth.accept().await?.finish_auth()
             } else {
                 auth.reject().await?;

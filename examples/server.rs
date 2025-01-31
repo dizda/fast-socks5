@@ -119,6 +119,7 @@ async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), So
                 user == *username && pass == *password
             })
             .await?
+            .0
         }
     }
     .read_command()

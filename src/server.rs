@@ -340,6 +340,28 @@ impl<T> Socks5ServerProtocol<T, states::Opened> {
     }
 }
 
+pub trait CheckResult {
+    fn is_good(&self) -> bool;
+}
+
+impl CheckResult for bool {
+    fn is_good(&self) -> bool {
+        *self
+    }
+}
+
+impl<T> CheckResult for Option<T> {
+    fn is_good(&self) -> bool {
+        self.is_some()
+    }
+}
+
+impl<T, E> CheckResult for Result<T, E> {
+    fn is_good(&self) -> bool {
+        self.is_ok()
+    }
+}
+
 impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     pub fn finish_auth<A: AuthMethodSuccessState<T>>(auth: A) -> Self {
         Self::new(auth.into_inner())
@@ -359,18 +381,20 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
             .finish_auth())
     }
 
-    pub async fn accept_password_auth<F>(inner: T, mut check: F) -> Result<Self>
+    pub async fn accept_password_auth<F, R>(inner: T, mut check: F) -> Result<(Self, R)>
     where
         T: AsyncWrite + AsyncRead + Unpin,
-        F: FnMut(String, String) -> bool,
+        F: FnMut(String, String) -> R,
+        R: CheckResult,
     {
         let (user, pass, auth) = Socks5ServerProtocol::start(inner)
             .negotiate_auth(&[PasswordAuthentication])
             .await?
             .read_username_password()
             .await?;
-        if check(user, pass) {
-            Ok(auth.accept().await?.finish_auth())
+        let check_result = check(user, pass);
+        if check_result.is_good() {
+            Ok((auth.accept().await?.finish_auth(), check_result))
         } else {
             auth.reject().await?;
             Err(SocksError::AuthenticationRejected(

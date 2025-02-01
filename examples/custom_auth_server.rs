@@ -5,8 +5,8 @@ extern crate log;
 use fast_socks5::{
     auth_method_enums,
     server::{
-        run_tcp_proxy, AuthMethod, AuthMethodSuccessState, PasswordAuthentication,
-        PasswordAuthenticationStarted, Socks5ServerProtocol,
+        run_tcp_proxy, AuthMethod, AuthMethodSuccessState, DnsResolveHelper as _,
+        PasswordAuthentication, PasswordAuthenticationStarted, Socks5ServerProtocol,
     },
     ReplyError, Result, Socks5Command, SocksError,
 };
@@ -151,9 +151,7 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
         AuthStarted::BackdoorAuthentication(auth) => auth.verify_timing().await?.finish_auth(),
     };
 
-    let (proto, cmd, mut target_addr) = proto.read_command().await?;
-
-    target_addr = target_addr.resolve_dns().await?;
+    let (proto, cmd, target_addr) = proto.read_command().await?.resolve_dns().await?;
 
     const REQUEST_TIMEOUT: u64 = 10;
     match cmd {

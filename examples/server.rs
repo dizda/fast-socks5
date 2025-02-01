@@ -4,7 +4,7 @@ extern crate log;
 
 use anyhow::Context;
 use fast_socks5::{
-    server::{run_tcp_proxy, run_udp_proxy, Socks5ServerProtocol},
+    server::{run_tcp_proxy, run_udp_proxy, DnsResolveHelper as _, Socks5ServerProtocol},
     ReplyError, Result, Socks5Command, SocksError,
 };
 use std::future::Future;
@@ -109,7 +109,7 @@ async fn spawn_socks_server() -> Result<()> {
 }
 
 async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), SocksError> {
-    let (proto, cmd, mut target_addr) = match &opt.auth {
+    let (proto, cmd, target_addr) = match &opt.auth {
         AuthMode::NoAuth if opt.skip_auth => {
             Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(socket)
         }
@@ -123,9 +123,9 @@ async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), So
         }
     }
     .read_command()
+    .await?
+    .resolve_dns()
     .await?;
-
-    target_addr = target_addr.resolve_dns().await?;
 
     match cmd {
         Socks5Command::TCPConnect => {

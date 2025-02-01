@@ -65,7 +65,7 @@ impl SocksServerError {
     pub fn to_reply_error(&self) -> ReplyError {
         match self {
             SocksServerError::UnknownCommand(_) => ReplyError::CommandNotSupported,
-            SocksServerError::AddrError(_) => ReplyError::AddressTypeNotSupported,
+            SocksServerError::AddrError(err) => err.to_reply_error(),
             _ => ReplyError::GeneralFailure,
         }
     }
@@ -775,13 +775,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
             }
         };
 
-        let (proto, cmd, mut target_addr) = proto.read_command().await?;
+        let (proto, cmd, target_addr) = {
+            let triple = proto.read_command().await?;
 
-        if self.config.dns_resolve {
-            target_addr = target_addr.resolve_dns().await?;
-        } else {
-            debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
-        }
+            if self.config.dns_resolve {
+                triple.resolve_dns().await?
+            } else {
+                debug!(
+                    "Domain won't be resolved because `dns_resolve`'s config has been turned off."
+                );
+                triple
+            }
+        };
 
         match cmd {
             cmd if !self.config.execute_command => {
@@ -962,7 +967,7 @@ macro_rules! try_notify {
                         rep_err
                     );
                 }
-                return Err(err);
+                return Err(err.into());
             }
         }
     };
@@ -1010,12 +1015,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         let mut proto = Socks5ServerProtocol::new(self.inner);
 
         // Guess address type
-        let target_addr = try_notify!(
-            proto,
-            read_address(&mut proto.inner, address_type)
-                .await
-                .map_err(SocksServerError::AddrError)
-        );
+        let target_addr = try_notify!(proto, read_address(&mut proto.inner, address_type).await);
 
         debug!("Request target is {}", target_addr);
 
@@ -1025,6 +1025,30 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         );
 
         Ok((proto, cmd, target_addr))
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait DnsResolveHelper
+where
+    Self: Sized,
+{
+    async fn resolve_dns(self) -> Result<Self, SocksServerError>;
+}
+
+impl<T> DnsResolveHelper
+    for (
+        Socks5ServerProtocol<T, states::CommandRead>,
+        Socks5Command,
+        TargetAddr,
+    )
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn resolve_dns(self) -> Result<Self, SocksServerError> {
+        let (proto, cmd, target_addr) = self;
+        let resolved_addr = try_notify!(proto, target_addr.resolve_dns().await);
+        Ok((proto, cmd, resolved_addr))
     }
 }
 

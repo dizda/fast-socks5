@@ -1,6 +1,7 @@
 use crate::consts;
 use crate::consts::SOCKS5_ADDR_TYPE_IPV4;
 use crate::read_exact;
+use crate::ReplyError;
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -33,6 +34,15 @@ pub enum AddrError {
     Utf8(#[source] std::string::FromUtf8Error),
     #[error("Unknown address type")]
     IncorrectAddressType,
+}
+
+impl AddrError {
+    pub fn to_reply_error(&self) -> ReplyError {
+        match self {
+            AddrError::IncorrectAddressType => ReplyError::AddressTypeNotSupported,
+            _ => ReplyError::ConnectionRefused,
+        }
+    }
 }
 
 /// A description of a connection target.

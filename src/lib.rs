@@ -187,6 +187,9 @@ pub enum SocksError {
     AuthenticationRejected(String),
 
     #[error(transparent)]
+    UdpHeaderError(#[from] UdpHeaderError),
+
+    #[error(transparent)]
     AddrError(#[from] AddrError),
 
     #[error(transparent)]
@@ -273,6 +276,18 @@ impl ReplyError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum UdpHeaderError {
+    #[error(transparent)]
+    AddrError(#[from] AddrError),
+    #[error("could not convert target addr: {0}")]
+    ToTargetAddr(#[source] io::Error),
+    #[error("could not read UDP header: {0}")]
+    ReadingError(#[source] io::Error),
+    #[error("does not match the expected reserved field")]
+    GarbageInReserved,
+}
+
 /// Generate UDP header
 ///
 /// # UDP Request header structure.
@@ -295,32 +310,34 @@ impl ReplyError {
 ///     o  DST.PORT       desired destination port
 ///     o  DATA     user data
 /// ```
-pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>> {
+pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>, UdpHeaderError> {
     let mut header = vec![
         0, 0, // RSV
         0, // FRAG
     ];
-    header.append(&mut target_addr.to_target_addr()?.to_be_bytes()?);
+    header.append(
+        &mut target_addr
+            .to_target_addr()
+            .map_err(UdpHeaderError::ToTargetAddr)?
+            .to_be_bytes()?,
+    );
 
     Ok(header)
 }
 
 /// Parse data from UDP client on raw buffer, return (frag, target_addr, payload).
-pub async fn parse_udp_request<'a>(mut req: &'a [u8]) -> Result<(u8, TargetAddr, &'a [u8])> {
-    let rsv = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+pub async fn parse_udp_request<'a>(
+    mut req: &'a [u8],
+) -> Result<(u8, TargetAddr, &'a [u8]), UdpHeaderError> {
+    let rsv = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
     if !rsv.eq(&[0u8; 2]) {
-        return Err(ReplyError::GeneralFailure.into());
+        return Err(UdpHeaderError::GarbageInReserved);
     }
 
-    let [frag, atyp] = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+    let [frag, atyp] = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
-    let target_addr = read_address(&mut req, atyp).await.map_err(|e| {
-        // print explicit error
-        error!("{:#}", e);
-        // then convert it to a reply
-        ReplyError::AddressTypeNotSupported
-    })?;
+    let target_addr = read_address(&mut req, atyp).await?;
 
     Ok((frag, target_addr, req))
 }

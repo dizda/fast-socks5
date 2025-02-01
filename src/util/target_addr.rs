@@ -112,6 +112,13 @@ impl TargetAddr {
         }
         Ok(buf)
     }
+
+    pub fn into_string_and_port(self) -> (String, u16) {
+        match self {
+            TargetAddr::Ip(socket_addr) => (socket_addr.ip().to_string(), socket_addr.port()),
+            TargetAddr::Domain(domain, port) => (domain, port),
+        }
+    }
 }
 
 // async-std ToSocketAddrs doesn't supports external trait implementation

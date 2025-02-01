@@ -47,3 +47,6 @@ name = "client"
 
 [[example]]
 name = "custom_auth_server"
+
+[[example]]
+name = "router"

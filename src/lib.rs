@@ -46,7 +46,6 @@ pub mod util;
 #[cfg(feature = "socks4")]
 pub mod socks4;
 
-use anyhow::Context;
 use std::fmt;
 use std::io;
 use thiserror::Error;
@@ -181,10 +180,11 @@ pub enum SocksError {
     UnsupportedSocksVersion(u8),
     #[error("Domain exceeded max sequence length")]
     ExceededMaxDomainLen(usize),
-    #[error("Authentication failed `{0}`")]
-    AuthenticationFailed(String),
     #[error("Authentication rejected `{0}`")]
     AuthenticationRejected(String),
+
+    #[error(transparent)]
+    ServerError(#[from] server::SocksServerError),
 
     #[error(transparent)]
     UdpHeaderError(#[from] UdpHeaderError),

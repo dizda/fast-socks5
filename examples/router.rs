@@ -164,7 +164,8 @@ async fn serve_socks5(
         .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
         .await?;
 
-    transfer(inner, client).await
+    transfer(inner, client).await;
+    Ok(())
 }
 
 async fn serve_admin_console(

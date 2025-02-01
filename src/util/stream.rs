@@ -1,8 +1,9 @@
-use crate::{ReplyError, Result};
-use tokio::io::ErrorKind as IOErrorKind;
-use tokio::time::timeout;
-use tokio::net::{TcpStream, ToSocketAddrs};
+use crate::ReplyError;
+use std::io;
 use std::time::Duration;
+use tokio::io::ErrorKind as IOErrorKind;
+use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::time::timeout;
 
 /// Easy to destructure bytes buffers by naming each fields:
 ///
@@ -45,36 +46,62 @@ macro_rules! ready {
     };
 }
 
-pub async fn tcp_connect_with_timeout<T>(addr: T, request_timeout_s: u64) -> Result<TcpStream>
-    where T: ToSocketAddrs,
+#[derive(thiserror::Error, Debug)]
+pub enum ConnectError {
+    #[error("Connection timed out")]
+    ConnectionTimeout,
+    #[error("Connection refused: {0}")]
+    ConnectionRefused(#[source] io::Error),
+    #[error("Connection aborted: {0}")]
+    ConnectionAborted(#[source] io::Error),
+    #[error("Connection reset: {0}")]
+    ConnectionReset(#[source] io::Error),
+    #[error("Not connected: {0}")]
+    NotConnected(#[source] io::Error),
+    #[error("Other i/o error: {0}")]
+    Other(#[source] io::Error),
+}
+
+impl ConnectError {
+    pub fn to_reply_error(&self) -> ReplyError {
+        match self {
+            ConnectError::ConnectionTimeout => ReplyError::ConnectionTimeout,
+            ConnectError::ConnectionRefused(_) => ReplyError::ConnectionRefused,
+            ConnectError::ConnectionAborted(_) | ConnectError::ConnectionReset(_) => {
+                ReplyError::ConnectionNotAllowed
+            }
+            ConnectError::NotConnected(_) => ReplyError::NetworkUnreachable,
+            ConnectError::Other(_) => ReplyError::GeneralFailure,
+        }
+    }
+}
+
+pub async fn tcp_connect_with_timeout<T>(
+    addr: T,
+    request_timeout_s: u64,
+) -> Result<TcpStream, ConnectError>
+where
+    T: ToSocketAddrs,
 {
     let fut = tcp_connect(addr);
     match timeout(Duration::from_secs(request_timeout_s), fut).await {
         Ok(result) => result,
-        Err(_) => Err(ReplyError::ConnectionTimeout.into()),
+        Err(_) => Err(ConnectError::ConnectionTimeout),
     }
 }
 
-pub async fn tcp_connect<T>(addr: T) -> Result<TcpStream>
-    where T: ToSocketAddrs,
+pub async fn tcp_connect<T>(addr: T) -> Result<TcpStream, ConnectError>
+where
+    T: ToSocketAddrs,
 {
     match TcpStream::connect(addr).await {
         Ok(o) => Ok(o),
         Err(e) => match e.kind() {
-            // Match other TCP errors with ReplyError
-            IOErrorKind::ConnectionRefused => {
-                Err(ReplyError::ConnectionRefused.into())
-            }
-            IOErrorKind::ConnectionAborted => {
-                Err(ReplyError::ConnectionNotAllowed.into())
-            }
-            IOErrorKind::ConnectionReset => {
-                Err(ReplyError::ConnectionNotAllowed.into())
-            }
-            IOErrorKind::NotConnected => {
-                Err(ReplyError::NetworkUnreachable.into())
-            }
-            _ => Err(e.into()), // #[error("General failure")] ?
+            IOErrorKind::ConnectionRefused => Err(ConnectError::ConnectionRefused(e)),
+            IOErrorKind::ConnectionAborted => Err(ConnectError::ConnectionAborted(e)),
+            IOErrorKind::ConnectionReset => Err(ConnectError::ConnectionReset(e)),
+            IOErrorKind::NotConnected => Err(ConnectError::NotConnected(e)),
+            _ => Err(ConnectError::Other(e)),
         },
     }
 }

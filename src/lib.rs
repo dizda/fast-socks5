@@ -51,6 +51,7 @@ use std::fmt;
 use std::io;
 use thiserror::Error;
 use util::target_addr::read_address;
+use util::target_addr::AddrError;
 use util::target_addr::TargetAddr;
 use util::target_addr::ToTargetAddr;
 
@@ -183,6 +184,9 @@ pub enum SocksError {
     AuthenticationFailed(String),
     #[error("Authentication rejected `{0}`")]
     AuthenticationRejected(String),
+
+    #[error(transparent)]
+    AddrError(#[from] AddrError),
 
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),

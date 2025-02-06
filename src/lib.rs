@@ -8,25 +8,23 @@
 //! - An `async`/`.await` [SOCKS4 Client](https://www.openssh.com/txt/socks4.protocol) implementation.
 //! - An `async`/`.await` [SOCKS4a Client](https://www.openssh.com/txt/socks4a.protocol) implementation.
 //! - No **unsafe** code
-//! - Built on-top of `tokio` library
+//! - Built on top of the [Tokio](https://tokio.rs/) runtime
 //! - Ultra lightweight and scalable
 //! - No system dependencies
 //! - Cross-platform
+//! - Infinitely extensible, explicit server API based on typestates for safety
+//!   - You control the request handling, the library only ensures you follow the proper protocol flow
+//!   - Can skip DNS resolution
+//!   - Can skip the authentication/handshake process (not RFC-compliant, for private use, to save on useless round-trips)
+//!   - Instead of proxying in-process, swap out `run_tcp_proxy` for custom handling to build a router or to use a custom accelerated proxying method
 //! - Authentication methods:
-//!   - No-Auth method
-//!   - Username/Password auth method
-//!   - Custom auth methods can be implemented via the Authentication Trait
-//!   - Credentials returned on authentication success
+//!   - No-Auth method (`0x00`)
+//!   - Username/Password auth method (`0x02`)
+//!   - Custom auth methods can be implemented on the server side via the `AuthMethod` Trait
+//!     - Multiple auth methods with runtime negotiation can be supported, with fast *static* dispatch (enums can be generated with the `auth_method_enums` macro)
+//! - UDP is supported
 //! - All SOCKS5 RFC errors (replies) should be mapped
-//! - `AsyncRead + AsyncWrite` traits are implemented on Socks5Stream & Socks5Socket
 //! - `IPv4`, `IPv6`, and `Domains` types are supported
-//! - Config helper for Socks5Server
-//! - Helpers to run a Socks5Server à la *"std's TcpStream"* via `incoming.next().await`
-//! - Examples come with real cases commands scenarios
-//! - Can disable `DNS resolving`
-//! - Can skip the authentication/handshake process, which will directly handle command's request (useful to save useless round-trips in a current authenticated environment)
-//! - Can disable command execution (useful if you just want to forward the request to a different server)
-//!
 //!
 //! ## Install
 //!
@@ -48,11 +46,12 @@ pub mod util;
 #[cfg(feature = "socks4")]
 pub mod socks4;
 
-use anyhow::Context;
 use std::fmt;
 use std::io;
 use thiserror::Error;
+use util::stream::ConnectError;
 use util::target_addr::read_address;
+use util::target_addr::AddrError;
 use util::target_addr::TargetAddr;
 use util::target_addr::ToTargetAddr;
 
@@ -181,10 +180,20 @@ pub enum SocksError {
     UnsupportedSocksVersion(u8),
     #[error("Domain exceeded max sequence length")]
     ExceededMaxDomainLen(usize),
-    #[error("Authentication failed `{0}`")]
-    AuthenticationFailed(String),
     #[error("Authentication rejected `{0}`")]
     AuthenticationRejected(String),
+
+    #[error(transparent)]
+    ServerError(#[from] server::SocksServerError),
+
+    #[error(transparent)]
+    UdpHeaderError(#[from] UdpHeaderError),
+
+    #[error(transparent)]
+    AddrError(#[from] AddrError),
+
+    #[error(transparent)]
+    ConnectError(#[from] ConnectError),
 
     #[error("Error with reply: {0}.")]
     ReplyError(#[from] ReplyError),
@@ -267,6 +276,18 @@ impl ReplyError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum UdpHeaderError {
+    #[error(transparent)]
+    AddrError(#[from] AddrError),
+    #[error("could not convert target addr: {0}")]
+    ToTargetAddr(#[source] io::Error),
+    #[error("could not read UDP header: {0}")]
+    ReadingError(#[source] io::Error),
+    #[error("does not match the expected reserved field")]
+    GarbageInReserved,
+}
+
 /// Generate UDP header
 ///
 /// # UDP Request header structure.
@@ -289,32 +310,34 @@ impl ReplyError {
 ///     o  DST.PORT       desired destination port
 ///     o  DATA     user data
 /// ```
-pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>> {
+pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>, UdpHeaderError> {
     let mut header = vec![
         0, 0, // RSV
         0, // FRAG
     ];
-    header.append(&mut target_addr.to_target_addr()?.to_be_bytes()?);
+    header.append(
+        &mut target_addr
+            .to_target_addr()
+            .map_err(UdpHeaderError::ToTargetAddr)?
+            .to_be_bytes()?,
+    );
 
     Ok(header)
 }
 
 /// Parse data from UDP client on raw buffer, return (frag, target_addr, payload).
-pub async fn parse_udp_request<'a>(mut req: &'a [u8]) -> Result<(u8, TargetAddr, &'a [u8])> {
-    let rsv = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+pub async fn parse_udp_request<'a>(
+    mut req: &'a [u8],
+) -> Result<(u8, TargetAddr, &'a [u8]), UdpHeaderError> {
+    let rsv = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
     if !rsv.eq(&[0u8; 2]) {
-        return Err(ReplyError::GeneralFailure.into());
+        return Err(UdpHeaderError::GarbageInReserved);
     }
 
-    let [frag, atyp] = read_exact!(req, [0u8; 2]).context("Malformed request")?;
+    let [frag, atyp] = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
-    let target_addr = read_address(&mut req, atyp).await.map_err(|e| {
-        // print explicit error
-        error!("{:#}", e);
-        // then convert it to a reply
-        ReplyError::AddressTypeNotSupported
-    })?;
+    let target_addr = read_address(&mut req, atyp).await?;
 
     Ok((frag, target_addr, req))
 }
@@ -327,14 +350,10 @@ mod test {
         sync::oneshot::Sender,
     };
 
-    use crate::{
-        client,
-        server::{self, SimpleUserPassword},
-    };
+    use crate::{client, server, ReplyError, Socks5Command};
     use std::{
         net::{SocketAddr, ToSocketAddrs},
         num::ParseIntError,
-        sync::Arc,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
@@ -344,27 +363,28 @@ mod test {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
-    async fn setup_socks_server(
-        proxy_addr: &str,
-        auth: Option<SimpleUserPassword>,
-        tx: Sender<SocketAddr>,
-    ) -> Result<()> {
-        let mut config = server::Config::default();
-        config.set_udp_support(true);
-        let config = match auth {
-            None => config,
-            Some(up) => config.with_authentication(up),
-        };
+    async fn setup_socks_server(proxy_addr: &str, tx: Sender<SocketAddr>) -> Result<()> {
+        let reply_ip = proxy_addr.parse::<SocketAddr>().unwrap().ip();
 
-        let config = Arc::new(config);
         let listener = TcpListener::bind(proxy_addr).await?;
         tx.send(listener.local_addr()?).unwrap();
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let mut socks5_socket = server::Socks5Socket::new(stream, config.clone());
-            socks5_socket.set_reply_ip(proxy_addr.parse::<SocketAddr>().unwrap().ip());
 
-            socks5_socket.upgrade_to_socks5().await?;
+        loop {
+            let (stream, _) = listener.accept().await?; // NOTE: not spawning for test
+            let proto = server::Socks5ServerProtocol::accept_no_auth(stream).await?;
+            let (proto, cmd, mut target_addr) = proto.read_command().await?;
+            target_addr = target_addr.resolve_dns().await?;
+            match cmd {
+                Socks5Command::TCPConnect => {
+                    server::run_tcp_proxy(proto, &target_addr, 10, false).await?;
+                }
+                Socks5Command::UDPAssociate => {
+                    server::run_udp_proxy(proto, &target_addr, reply_ip).await?;
+                }
+                Socks5Command::TCPBind => {
+                    proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                }
+            }
         }
     }
 
@@ -385,7 +405,7 @@ mod test {
         init();
         block_on(async {
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
 
             let socket = client::Socks5Stream::connect(
                 rx.await.unwrap(),
@@ -406,7 +426,7 @@ mod test {
             const MOCK_ADDRESS: &str = "[::1]:40235";
 
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
             // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the
@@ -449,7 +469,7 @@ mod test {
             const DNS_SERVER: &str = "1.1.1.1:53";
 
             let (tx, rx) = oneshot::channel();
-            tokio::spawn(setup_socks_server("[::1]:0", None, tx));
+            tokio::spawn(setup_socks_server("[::1]:0", tx));
             let backing_socket = TcpStream::connect(rx.await.unwrap()).await.unwrap();
 
             // Creates a UDP tunnel which can be used to forward UDP packets, "[::]:0" indicates the

@@ -3,17 +3,22 @@ use crate::parse_udp_request;
 use crate::read_exact;
 use crate::ready;
 use crate::util::stream::tcp_connect_with_timeout;
+use crate::util::stream::ConnectError;
+use crate::util::target_addr::AddrError;
 use crate::util::target_addr::{read_address, TargetAddr};
 use crate::Socks5Command;
-use crate::{consts, AuthenticationMethod, ReplyError, Result, SocksError};
+use crate::UdpHeaderError;
+use crate::{consts, AuthenticationMethod, ReplyError, SocksError};
 use anyhow::Context;
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::ops::Deref;
 use std::pin::Pin;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -21,6 +26,66 @@ use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::try_join;
 use tokio_stream::Stream;
+
+#[derive(thiserror::Error, Debug)]
+pub enum SocksServerError {
+    #[error("i/o error when {context}: {source}")]
+    Io {
+        source: io::Error,
+        context: &'static str,
+    },
+    #[error("string error when {context}: {source}")]
+    FromUtf8 {
+        source: FromUtf8Error,
+        context: &'static str,
+    },
+    #[error(transparent)]
+    ConnectError(#[from] ConnectError),
+    #[error(transparent)]
+    UdpHeaderError(#[from] UdpHeaderError),
+    #[error(transparent)]
+    AddrError(#[from] AddrError),
+    #[error("BUG: {0}")] // should be unreachable
+    Bug(&'static str),
+    #[error("Auth method unacceptable `{0:?}`.")]
+    AuthMethodUnacceptable(Vec<u8>),
+    #[error("Unsupported SOCKS version `{0}`.")]
+    UnsupportedSocksVersion(u8),
+    #[error("Unsupported SOCKS command `{0}`.")]
+    UnknownCommand(u8),
+    #[error("Empty username received")]
+    EmptyUsername,
+    #[error("Empty password received")]
+    EmptyPassword,
+    #[error("Authentication rejected")]
+    AuthenticationRejected,
+}
+
+impl SocksServerError {
+    pub fn to_reply_error(&self) -> ReplyError {
+        match self {
+            SocksServerError::UnknownCommand(_) => ReplyError::CommandNotSupported,
+            SocksServerError::AddrError(err) => err.to_reply_error(),
+            _ => ReplyError::GeneralFailure,
+        }
+    }
+}
+
+trait ErrorContext<T> {
+    fn err_when(self, context: &'static str) -> Result<T, SocksServerError>;
+}
+
+impl<T> ErrorContext<T> for Result<T, io::Error> {
+    fn err_when(self, context: &'static str) -> Result<T, SocksServerError> {
+        self.map_err(|source| SocksServerError::Io { source, context })
+    }
+}
+
+impl<T> ErrorContext<T> for Result<T, FromUtf8Error> {
+    fn err_when(self, context: &'static str) -> Result<T, SocksServerError> {
+        self.map_err(|source| SocksServerError::FromUtf8 { source, context })
+    }
+}
 
 #[derive(Clone)]
 pub struct Config<A: Authentication = DenyAuthentication> {
@@ -64,6 +129,31 @@ pub trait Authentication: Send + Sync {
     type Item;
 
     async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item>;
+}
+
+async fn authenticate_callback<T: AsyncRead + AsyncWrite + Unpin, A: Authentication>(
+    auth_callback: &A,
+    auth: StandardAuthenticationStarted<T>,
+) -> Result<(Socks5ServerProtocol<T, states::Authenticated>, A::Item), SocksServerError> {
+    match auth {
+        StandardAuthenticationStarted::NoAuthentication(auth) => {
+            if let Some(credentials) = auth_callback.authenticate(None).await {
+                Ok((auth.finish_auth(), credentials))
+            } else {
+                Err(SocksServerError::AuthenticationRejected)
+            }
+        }
+        StandardAuthenticationStarted::PasswordAuthentication(auth) => {
+            let (username, password, auth) = auth.read_username_password().await?;
+            if let Some(credentials) = auth_callback.authenticate(Some((username, password))).await
+            {
+                Ok((auth.accept().await?.finish_auth(), credentials))
+            } else {
+                auth.reject().await?;
+                Err(SocksServerError::AuthenticationRejected)
+            }
+        }
+    }
 }
 
 /// Basic user/pass auth method provided.
@@ -187,11 +277,16 @@ impl<A: Authentication> Config<A> {
 
 /// Wrapper of TcpListener
 /// Useful if you don't use any existing TcpListener's streams.
+#[deprecated(
+    since = "0.11.0",
+    note = "Use the new explicit API instead, see examples/server.rs"
+)]
 pub struct Socks5Server<A: Authentication = DenyAuthentication> {
     listener: TcpListener,
     config: Arc<Config<A>>,
 }
 
+#[allow(deprecated)]
 impl<A: Authentication + Default> Socks5Server<A> {
     pub async fn bind<S: AsyncToSocketAddrs>(addr: S) -> io::Result<Self> {
         let listener = TcpListener::bind(&addr).await?;
@@ -201,6 +296,7 @@ impl<A: Authentication + Default> Socks5Server<A> {
     }
 }
 
+#[allow(deprecated)]
 impl<A: Authentication> Socks5Server<A> {
     /// Set a custom config
     pub fn with_config<T: Authentication>(self, config: Config<T>) -> Socks5Server<T> {
@@ -219,6 +315,7 @@ impl<A: Authentication> Socks5Server<A> {
 /// `Incoming` implements [`futures_core::stream::Stream`].
 ///
 /// [`futures_core::stream::Stream`]: https://docs.rs/futures/0.3.30/futures/stream/trait.Stream.html
+#[allow(deprecated)]
 pub struct Incoming<'a, A: Authentication>(
     &'a Socks5Server<A>,
     Option<Pin<Box<dyn Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send + Sync + 'a>>>,
@@ -226,8 +323,9 @@ pub struct Incoming<'a, A: Authentication>(
 
 /// Iterator for each incoming stream connection
 /// this wrapper will convert async_std TcpStream into Socks5Socket.
+#[allow(deprecated)]
 impl<'a, A: Authentication> Stream for Incoming<'a, A> {
-    type Item = Result<Socks5Socket<TcpStream, A>>;
+    type Item = Result<Socks5Socket<TcpStream, A>, SocksError>;
 
     /// this code is mainly borrowed from [`Incoming::poll_next()` of `TcpListener`][tcpListenerLink]
     ///
@@ -259,6 +357,10 @@ impl<'a, A: Authentication> Stream for Incoming<'a, A> {
 }
 
 /// Wrap TcpStream and contains Socks5 protocol implementation.
+#[deprecated(
+    since = "0.11.0",
+    note = "Use the new explicit API instead, see examples/server.rs"
+)]
 pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
     inner: T,
     config: Arc<Config<A>>,
@@ -272,6 +374,351 @@ pub struct Socks5Socket<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> {
     credentials: Option<A::Item>,
 }
 
+pub mod states {
+    pub struct Opened;
+    pub struct Authenticated;
+    pub struct CommandRead;
+}
+
+pub struct Socks5ServerProtocol<T, S> {
+    inner: T,
+    _state: PhantomData<S>,
+}
+
+impl<T, S> Socks5ServerProtocol<T, S> {
+    fn new(inner: T) -> Self {
+        Socks5ServerProtocol {
+            inner,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T> Socks5ServerProtocol<T, states::Opened> {
+    /// Start handling the SOCKS5 protocol flow, wrapping a client socket.
+    pub fn start(inner: T) -> Self {
+        Self::new(inner)
+    }
+}
+
+pub trait CheckResult {
+    fn is_good(&self) -> bool;
+}
+
+impl CheckResult for bool {
+    fn is_good(&self) -> bool {
+        *self
+    }
+}
+
+impl<T> CheckResult for Option<T> {
+    fn is_good(&self) -> bool {
+        self.is_some()
+    }
+}
+
+impl<T, E> CheckResult for Result<T, E> {
+    fn is_good(&self) -> bool {
+        self.is_ok()
+    }
+}
+
+impl<T> Socks5ServerProtocol<T, states::Authenticated> {
+    /// Finish handling the authentication method-specific part of the protocol,
+    /// returning back to the overall SOCKS5 flow.
+    pub fn finish_auth<A: AuthMethodSuccessState<T>>(auth: A) -> Self {
+        Self::new(auth.into_inner())
+    }
+
+    /// Wrap a socket in a SOCKS5 flow handler that's already marked as authenticated.
+    ///
+    /// This is not actually part of the official SOCKS5 protocol, but allows you to
+    /// only use the post-authentication subset of it.
+    pub fn skip_auth_this_is_not_rfc_compliant(inner: T) -> Self {
+        Self::new(inner)
+    }
+
+    /// Handle the SOCKS5 auth negotiation supporting only the `NoAuthentication` method.
+    pub async fn accept_no_auth(inner: T) -> Result<Self, SocksServerError>
+    where
+        T: AsyncWrite + AsyncRead + Unpin,
+    {
+        Ok(Socks5ServerProtocol::start(inner)
+            .negotiate_auth(&[NoAuthentication])
+            .await?
+            .finish_auth())
+    }
+
+    /// Handle the SOCKS5 auth negotiation supporting only the `PasswordAuthentication` method,
+    /// and verify the provided username and password using the provided closure.
+    ///
+    /// The closure can mutate state variables and/or return a result as `Option`/`Result`.
+    pub async fn accept_password_auth<F, R>(
+        inner: T,
+        mut check: F,
+    ) -> Result<(Self, R), SocksServerError>
+    where
+        T: AsyncWrite + AsyncRead + Unpin,
+        F: FnMut(String, String) -> R,
+        R: CheckResult,
+    {
+        let (user, pass, auth) = Socks5ServerProtocol::start(inner)
+            .negotiate_auth(&[PasswordAuthentication])
+            .await?
+            .read_username_password()
+            .await?;
+        let check_result = check(user, pass);
+        if check_result.is_good() {
+            Ok((auth.accept().await?.finish_auth(), check_result))
+        } else {
+            auth.reject().await?;
+            Err(SocksServerError::AuthenticationRejected)
+        }
+    }
+}
+
+/// A trait for the final successful state of an authentication method's implementation.
+///
+/// This allows `Socks5ServerProtocol<T, states::Authenticated>::finish_authentication` to
+/// let the user continue with the protocol after the socket has been handed off to the
+/// authentication method.
+pub trait AuthMethodSuccessState<T> {
+    fn into_inner(self) -> T;
+
+    fn finish_auth(self) -> Socks5ServerProtocol<T, states::Authenticated>
+    where
+        Self: Sized,
+    {
+        Socks5ServerProtocol::finish_auth(self)
+    }
+}
+
+/// A metadata trait for authentication methods, essentially binding an ID value
+/// (as used in the method negotiation) to an actual implementation of the method.
+///
+/// Use blank structs for individual protocol implementations and
+/// enums for sets of supported protocols (you'll need a matching enum for the `Impl`).
+pub trait AuthMethod<T>: Copy {
+    type StartingState;
+    fn method_id(self) -> u8;
+    fn new(self, inner: T) -> Self::StartingState;
+}
+
+pub struct NoAuthenticationImpl<T>(T);
+
+impl<T> AuthMethodSuccessState<T> for NoAuthenticationImpl<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// The "NO AUTHENTICATION REQUIRED" auth method, ID 00h as specifed by RFC 1928.
+///
+/// As the dummy no-auth method, it only has one state. Once it's been negotiated,
+/// you can immediately continue with `finish_authentication`.
+///
+/// Or not so immediately: if you want to use no-authentication with e.g. IP address
+/// allowlisting or TLS client certificate auth for TLS-wrapped SOCKS5, this is your
+/// opportunity to reject the no-authentication by dropping the connection!
+#[derive(Debug, Clone, Copy)]
+pub struct NoAuthentication;
+
+impl<T> AuthMethod<T> for NoAuthentication {
+    type StartingState = NoAuthenticationImpl<T>;
+
+    fn method_id(self) -> u8 {
+        0x00
+    }
+
+    fn new(self, inner: T) -> Self::StartingState {
+        NoAuthenticationImpl(inner)
+    }
+}
+
+mod password_states {
+    pub struct Started;
+    pub struct Received;
+    pub struct Finished;
+}
+
+pub struct PasswordAuthenticationImpl<T, S> {
+    inner: T,
+    _state: PhantomData<S>,
+}
+
+pub type PasswordAuthenticationStarted<T> = PasswordAuthenticationImpl<T, password_states::Started>;
+
+impl<T, S> PasswordAuthenticationImpl<T, S> {
+    fn new(inner: T) -> Self {
+        PasswordAuthenticationImpl {
+            inner,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Started> {
+    /// Handle the username and password sent by the client.
+    pub async fn read_username_password(
+        self,
+    ) -> Result<
+        (
+            String,
+            String,
+            PasswordAuthenticationImpl<T, password_states::Received>,
+        ),
+        SocksServerError,
+    > {
+        let mut socket = self.inner;
+        trace!("PasswordAuthenticationStarted: read_username_password()");
+        let [version, user_len] = read_exact!(socket, [0u8; 2]).err_when("reading user len")?;
+        debug!(
+            "Auth: [version: {version}, user len: {len}]",
+            version = version,
+            len = user_len,
+        );
+
+        if user_len < 1 {
+            return Err(SocksServerError::EmptyUsername);
+        }
+
+        let username =
+            read_exact!(socket, vec![0u8; user_len as usize]).err_when("reading username")?;
+        debug!("username bytes: {:?}", &username);
+
+        let [pass_len] = read_exact!(socket, [0u8; 1]).err_when("reading password len")?;
+        debug!("Auth: [pass len: {len}]", len = pass_len,);
+
+        if pass_len < 1 {
+            return Err(SocksServerError::EmptyPassword);
+        }
+
+        let password =
+            read_exact!(socket, vec![0u8; pass_len as usize]).err_when("reading password")?;
+        debug!("password bytes: {:?}", &password);
+
+        let username = String::from_utf8(username).err_when("converting username")?;
+        let password = String::from_utf8(password).err_when("converting password")?;
+
+        Ok((username, password, PasswordAuthenticationImpl::new(socket)))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Received> {
+    /// Notify the client with a "SUCCEEDED" reply and proceed to finish the authentication.
+    pub async fn accept(
+        mut self,
+    ) -> Result<PasswordAuthenticationImpl<T, password_states::Finished>, SocksServerError> {
+        self.inner
+            .write_all(&[1, consts::SOCKS5_REPLY_SUCCEEDED])
+            .await
+            .err_when("replying auth success")?;
+
+        info!("Password authentication accepted.");
+        Ok(PasswordAuthenticationImpl::new(self.inner))
+    }
+
+    /// Notify the client with a "NOT_ACCEPTABLE" reply and drop the socket.
+    pub async fn reject(mut self) -> Result<(), SocksServerError> {
+        self.inner
+            .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
+            .await
+            .err_when("replying with auth method not acceptable")?;
+
+        info!("Password authentication rejected.");
+        Ok(())
+    }
+}
+
+impl<T> AuthMethodSuccessState<T> for PasswordAuthenticationImpl<T, password_states::Finished> {
+    fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+/// The "USERNAME/PASSWORD" auth method, ID 02h as specified by RFC 1928.
+#[derive(Debug, Clone, Copy)]
+pub struct PasswordAuthentication;
+
+impl<T> AuthMethod<T> for PasswordAuthentication {
+    type StartingState = PasswordAuthenticationImpl<T, password_states::Started>;
+
+    fn method_id(self) -> u8 {
+        0x02
+    }
+
+    fn new(self, inner: T) -> Self::StartingState {
+        PasswordAuthenticationImpl::new(inner)
+    }
+}
+
+#[macro_export]
+macro_rules! auth_method_enums {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $enum:ident / $(#[$state_enum_meta:meta])* $state_enum:ident<$state_enum_par:ident> {
+            $($method:ident($state:ty)),+ $(,)?
+        }
+    ) => {
+        $(#[$state_enum_meta])*
+        $vis enum $state_enum<$state_enum_par> {
+            $($method($state)),+
+        }
+
+        #[derive(Clone, Copy)]
+        $(#[$enum_meta])*
+        $vis enum $enum {
+            $($method($method)),+
+        }
+
+        impl<T> AuthMethod<T> for $enum {
+            type StartingState = $state_enum<T>;
+
+            fn method_id(self) -> u8 {
+                match self {
+                    $($enum::$method(auth) => AuthMethod::<T>::method_id(auth)),+
+                }
+            }
+
+            fn new(self, inner: T) -> Self::StartingState {
+                match self {
+                    $($enum::$method(auth) => $state_enum::$method(auth.new(inner))),+
+                }
+            }
+        }
+    };
+}
+
+auth_method_enums! {
+    /// The combination of all authentication methods supported by this crate out of the box,
+    /// as an enum appropriate for static dispatch.
+    ///
+    /// If you want to add your own custom methods, you can generate a similar enum using the `auth_method_enums` macro.
+    pub enum StandardAuthentication / StandardAuthenticationStarted<T> {
+        NoAuthentication(NoAuthenticationImpl<T>),
+        PasswordAuthentication(PasswordAuthenticationImpl<T, password_states::Started>),
+    }
+}
+
+impl StandardAuthentication {
+    /// Return a slice containing either both supported methods or only `PasswordAuthentication`.
+    pub fn allow_no_auth(allow: bool) -> &'static [StandardAuthentication] {
+        if allow {
+            &[
+                // The order of authentication methods can be tested by clients in sequence,
+                // so list more secure or preferred methods first
+                StandardAuthentication::PasswordAuthentication(PasswordAuthentication),
+                StandardAuthentication::NoAuthentication(NoAuthentication),
+            ]
+        } else {
+            &[StandardAuthentication::PasswordAuthentication(
+                PasswordAuthentication,
+            )]
+        }
+    }
+}
+
+#[allow(deprecated)]
 impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     pub fn new(socket: T, config: Arc<Config<A>>) -> Self {
         Socks5Socket {
@@ -302,34 +749,74 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
-    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A>> {
+    pub async fn upgrade_to_socks5(mut self) -> Result<Socks5Socket<T, A>, SocksError> {
         trace!("upgrading to socks5...");
 
+        // NOTE: this cannot be split in two without making self.inner an Option
+
         // Handshake
-        if !self.config.skip_auth {
-            let methods = self.get_methods().await?;
-
-            let auth_method = self.can_accept_method(methods).await?;
-
-            if self.config.auth.is_some() {
-                let credentials = self.authenticate(auth_method).await?;
-                self.credentials = Some(credentials);
+        let proto = match self.config.auth.as_ref() {
+            _ if self.config.skip_auth => {
+                debug!("skipping auth");
+                Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(self.inner)
             }
-        } else {
-            debug!("skipping auth");
-        }
-
-        match self.request().await {
-            Ok(_) => {}
-            Err(SocksError::ReplyError(e)) => {
-                // If a reply error has been returned, we send it to the client
-                self.reply_error(&e).await?;
-                return Err(e.into()); // propagate the error to end this connection's task
+            None => Socks5ServerProtocol::start(self.inner)
+                .negotiate_auth(&[NoAuthentication])
+                .await?
+                .finish_auth(),
+            Some(auth_callback) => {
+                let methods = StandardAuthentication::allow_no_auth(self.config.allow_no_auth);
+                let auth = Socks5ServerProtocol::start(self.inner)
+                    .negotiate_auth(methods)
+                    .await?;
+                let (proto, creds) = authenticate_callback(auth_callback.as_ref(), auth).await?;
+                self.credentials = Some(creds);
+                proto
             }
-            // if any other errors has been detected, we simply end connection's task
-            Err(d) => return Err(d),
         };
 
+        let (proto, cmd, target_addr) = {
+            let triple = proto.read_command().await?;
+
+            if self.config.dns_resolve {
+                triple.resolve_dns().await?
+            } else {
+                debug!(
+                    "Domain won't be resolved because `dns_resolve`'s config has been turned off."
+                );
+                triple
+            }
+        };
+
+        match cmd {
+            cmd if !self.config.execute_command => {
+                self.cmd = Some(cmd);
+                self.inner = proto.inner;
+            }
+            Socks5Command::TCPConnect => {
+                self.inner = run_tcp_proxy(
+                    proto,
+                    &target_addr,
+                    self.config.request_timeout,
+                    self.config.nodelay,
+                )
+                .await?;
+            }
+            Socks5Command::UDPAssociate if self.config.allow_udp => {
+                self.inner = run_udp_proxy(
+                    proto,
+                    &target_addr,
+                    self.reply_ip.context("invalid reply ip")?,
+                )
+                .await?;
+            }
+            _ => {
+                proto.reply_error(&ReplyError::CommandNotSupported).await?;
+                return Err(ReplyError::CommandNotSupported.into());
+            }
+        };
+
+        self.target_addr = Some(target_addr); /* legacy API leaves it exported */
         Ok(self)
     }
 
@@ -338,287 +825,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
         self.inner
     }
 
-    /// Read the authentication method provided by the client.
-    /// A client send a list of methods that he supports, he could send
-    ///
-    ///   - 0: Non auth
-    ///   - 2: Auth with username/password
-    ///
-    /// Altogether, then the server choose to use of of these,
-    /// or deny the handshake (thus the connection).
-    ///
-    /// # Examples
-    /// ```text
-    ///                    {SOCKS Version, methods-length}
-    ///     eg. (non-auth) {5, 2}
-    ///     eg. (auth)     {5, 3}
-    /// ```
-    ///
-    async fn get_methods(&mut self) -> Result<Vec<u8>> {
-        trace!("Socks5Socket: get_methods()");
-        // read the first 2 bytes which contains the SOCKS version and the methods len()
-        let [version, methods_len] =
-            read_exact!(self.inner, [0u8; 2]).context("Can't read methods")?;
-        debug!(
-            "Handshake headers: [version: {version}, methods len: {len}]",
-            version = version,
-            len = methods_len,
-        );
-
-        if version != consts::SOCKS5_VERSION {
-            return Err(SocksError::UnsupportedSocksVersion(version));
-        }
-
-        // {METHODS available from the client}
-        // eg. (non-auth) {0, 1}
-        // eg. (auth)     {0, 1, 2}
-        let methods = read_exact!(self.inner, vec![0u8; methods_len as usize])
-            .context("Can't get methods.")?;
-        debug!("methods supported sent by the client: {:?}", &methods);
-
-        // Return methods available
-        Ok(methods)
-    }
-
-    /// Decide to whether or not, accept the authentication method.
-    /// Don't forget that the methods list sent by the client, contains one or more methods.
-    ///
-    /// # Request
-    ///
-    ///  Client send an array of 3 entries: [0, 1, 2]
-    /// ```text
-    ///                          {SOCKS Version,  Authentication chosen}
-    ///     eg. (non-auth)       {5, 0}
-    ///     eg. (GSSAPI)         {5, 1}
-    ///     eg. (auth)           {5, 2}
-    /// ```
-    ///
-    /// # Response
-    /// ```text
-    ///     eg. (accept non-auth) {5, 0x00}
-    ///     eg. (non-acceptable)  {5, 0xff}
-    /// ```
-    ///
-    async fn can_accept_method(&mut self, client_methods: Vec<u8>) -> Result<u8> {
-        let method_supported;
-
-        if let Some(_auth) = self.config.auth.as_ref() {
-            if client_methods.contains(&consts::SOCKS5_AUTH_METHOD_PASSWORD) {
-                // can auth with password
-                method_supported = consts::SOCKS5_AUTH_METHOD_PASSWORD;
-            } else {
-                // client hasn't provided a password
-                if self.config.allow_no_auth {
-                    // but we allow no auth, for ip whitelisting
-                    method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
-                } else {
-                    // we don't allow no auth, so we deny the entry
-                    debug!("Don't support this auth method, reply with (0xff)");
-                    self.inner
-                        .write_all(&[
-                            consts::SOCKS5_VERSION,
-                            consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
-                        ])
-                        .await
-                        .context("Can't reply with method not acceptable.")?;
-
-                    return Err(SocksError::AuthMethodUnacceptable(client_methods));
-                }
-            }
-        } else {
-            method_supported = consts::SOCKS5_AUTH_METHOD_NONE;
-        }
-
-        debug!(
-            "Reply with method {} ({})",
-            AuthenticationMethod::from_u8(method_supported).context("Method not supported")?,
-            method_supported
-        );
-        self.inner
-            .write(&[consts::SOCKS5_VERSION, method_supported])
-            .await
-            .context("Can't reply with method auth-none")?;
-        Ok(method_supported)
-    }
-
-    async fn read_username_password(socket: &mut T) -> Result<(String, String)> {
-        trace!("Socks5Socket: authenticate()");
-        let [version, user_len] = read_exact!(socket, [0u8; 2]).context("Can't read user len")?;
-        debug!(
-            "Auth: [version: {version}, user len: {len}]",
-            version = version,
-            len = user_len,
-        );
-
-        if user_len < 1 {
-            return Err(SocksError::AuthenticationFailed(format!(
-                "Username malformed ({} chars)",
-                user_len
-            )));
-        }
-
-        let username =
-            read_exact!(socket, vec![0u8; user_len as usize]).context("Can't get username.")?;
-        debug!("username bytes: {:?}", &username);
-
-        let [pass_len] = read_exact!(socket, [0u8; 1]).context("Can't read pass len")?;
-        debug!("Auth: [pass len: {len}]", len = pass_len,);
-
-        if pass_len < 1 {
-            return Err(SocksError::AuthenticationFailed(format!(
-                "Password malformed ({} chars)",
-                pass_len
-            )));
-        }
-
-        let password =
-            read_exact!(socket, vec![0u8; pass_len as usize]).context("Can't get password.")?;
-        debug!("password bytes: {:?}", &password);
-
-        let username = String::from_utf8(username).context("Failed to convert username")?;
-        let password = String::from_utf8(password).context("Failed to convert password")?;
-
-        Ok((username, password))
-    }
-
-    /// Only called if
-    ///  - this server has `Authentication` trait implemented.
-    ///  - and the client supports authentication via username/password
-    ///  - or the client doesn't send authentication, but we let the trait decides if the `allow_no_auth()` set as `true`
-    async fn authenticate(&mut self, auth_method: u8) -> Result<A::Item> {
-        let credentials = if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
-            let credentials = Self::read_username_password(&mut self.inner).await?;
-            Some(credentials)
-        } else {
-            // the client hasn't provided any credentials, the function auth.authenticate()
-            // will then check None, according to other parameters provided by the trait
-            // such as IP, etc.
-            None
-        };
-
-        let auth = self.config.auth.as_ref().context("No auth module")?;
-
-        if let Some(credentials) = auth.authenticate(credentials).await {
-            if auth_method == consts::SOCKS5_AUTH_METHOD_PASSWORD {
-                // only the password way expect to write a response at this moment
-                self.inner
-                    .write_all(&[1, consts::SOCKS5_REPLY_SUCCEEDED])
-                    .await
-                    .context("Can't reply auth success")?;
-            }
-
-            info!("User logged successfully.");
-
-            return Ok(credentials);
-        } else {
-            self.inner
-                .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
-                .await
-                .context("Can't reply with auth method not acceptable.")?;
-
-            return Err(SocksError::AuthenticationRejected(format!(
-                "Authentication, rejected."
-            )));
-        }
-    }
-
-    /// Wrapper to principally cover ReplyError types for both functions read & execute request.
-    async fn request(&mut self) -> Result<()> {
-        self.read_command().await?;
-
-        if self.config.dns_resolve {
-            self.resolve_dns().await?;
-        } else {
-            debug!("Domain won't be resolved because `dns_resolve`'s config has been turned off.")
-        }
-
-        if self.config.execute_command {
-            self.execute_command().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Reply error to the client with the reply code according to the RFC.
-    async fn reply_error(&mut self, error: &ReplyError) -> Result<()> {
-        let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
-        debug!("reply error to be written: {:?}", &reply);
-
-        self.inner
-            .write(&reply)
-            .await
-            .context("Can't write the reply!")?;
-
-        self.inner.flush().await.context("Can't flush the reply!")?;
-
-        Ok(())
-    }
-
-    /// Decide to whether or not, accept the authentication method.
-    /// Don't forget that the methods list sent by the client, contains one or more methods.
-    ///
-    /// # Request
-    /// ```text
-    ///          +----+-----+-------+------+----------+----------+
-    ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-    ///          +----+-----+-------+------+----------+----------+
-    ///          | 1  |  1  |   1   |  1   | Variable |    2     |
-    ///          +----+-----+-------+------+----------+----------+
-    /// ```
-    ///
-    /// It the request is correct, it should returns a ['SocketAddr'].
-    ///
-    async fn read_command(&mut self) -> Result<()> {
-        let [version, cmd, rsv, address_type] =
-            read_exact!(self.inner, [0u8; 4]).context("Malformed request")?;
-        debug!(
-            "Request: [version: {version}, command: {cmd}, rev: {rsv}, address_type: {address_type}]",
-            version = version,
-            cmd = cmd,
-            rsv = rsv,
-            address_type = address_type,
-        );
-
-        if version != consts::SOCKS5_VERSION {
-            return Err(SocksError::UnsupportedSocksVersion(version));
-        }
-
-        match Socks5Command::from_u8(cmd) {
-            None => return Err(ReplyError::CommandNotSupported.into()),
-            Some(cmd) => match cmd {
-                Socks5Command::TCPConnect => {
-                    self.cmd = Some(cmd);
-                }
-                Socks5Command::UDPAssociate => {
-                    if !self.config.allow_udp {
-                        return Err(ReplyError::CommandNotSupported.into());
-                    }
-                    self.cmd = Some(cmd);
-                }
-                Socks5Command::TCPBind => return Err(ReplyError::CommandNotSupported.into()),
-            },
-        }
-
-        // Guess address type
-        let target_addr = read_address(&mut self.inner, address_type)
-            .await
-            .map_err(|e| {
-                // print explicit error
-                error!("{:#}", e);
-                // then convert it to a reply
-                ReplyError::AddressTypeNotSupported
-            })?;
-
-        self.target_addr = Some(target_addr);
-
-        debug!("Request target is {}", self.target_addr.as_ref().unwrap());
-
-        Ok(())
-    }
-
     /// This function is public, it can be call manually on your own-willing
     /// if config flag has been turned off: `Config::dns_resolve == false`.
-    pub async fn resolve_dns(&mut self) -> Result<()> {
+    pub async fn resolve_dns(&mut self) -> Result<(), SocksError> {
         trace!("resolving dns");
         if let Some(target_addr) = self.target_addr.take() {
             // decide whether we have to resolve DNS or not
@@ -627,95 +836,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                 TargetAddr::Ip(_) => Some(target_addr),
             };
         }
-
-        Ok(())
-    }
-
-    /// Execute the socks5 command that the client wants.
-    async fn execute_command(&mut self) -> Result<()> {
-        match &self.cmd {
-            None => Err(ReplyError::CommandNotSupported.into()),
-            Some(cmd) => match cmd {
-                Socks5Command::TCPBind => Err(ReplyError::CommandNotSupported.into()),
-                Socks5Command::TCPConnect => return self.execute_command_connect().await,
-                Socks5Command::UDPAssociate => {
-                    if self.config.allow_udp {
-                        return self.execute_command_udp_assoc().await;
-                    } else {
-                        Err(ReplyError::CommandNotSupported.into())
-                    }
-                }
-            },
-        }
-    }
-
-    /// Connect to the target address that the client wants,
-    /// then forward the data between them (client <=> target address).
-    async fn execute_command_connect(&mut self) -> Result<()> {
-        // async-std's ToSocketAddrs doesn't supports external trait implementation
-        // @see https://github.com/async-rs/async-std/issues/539
-        let addr = self
-            .target_addr
-            .as_ref()
-            .context("target_addr empty")?
-            .to_socket_addrs()?
-            .next()
-            .context("unreachable")?;
-
-        // TCP connect with timeout, to avoid memory leak for connection that takes forever
-        let outbound = tcp_connect_with_timeout(addr, self.config.request_timeout).await?;
-
-        // Disable Nagle's algorithm if config specifies to do so.
-        outbound.set_nodelay(self.config.nodelay)?;
-
-        debug!("Connected to remote destination");
-
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        self.inner.flush().await.context("Can't flush the reply!")?;
-
-        debug!("Wrote success");
-
-        transfer(&mut self.inner, outbound).await
-    }
-
-    /// Bind to a random UDP port, wait for the traffic from
-    /// the client, and then forward the data to the remote addr.
-    async fn execute_command_udp_assoc(&mut self) -> Result<()> {
-        // The DST.ADDR and DST.PORT fields contain the address and port that
-        // the client expects to use to send UDP datagrams on for the
-        // association. The server MAY use this information to limit access
-        // to the association.
-        // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
-        //
-        // We do NOT limit the access from the client currently in this implementation.
-        let _not_used = self.target_addr.as_ref();
-
-        // Listen with UDP6 socket, so the client can connect to it with either
-        // IPv4 or IPv6.
-        let peer_sock = UdpSocket::bind("[::]:0").await?;
-
-        // Respect the pre-populated reply IP address.
-        self.inner
-            .write(&new_reply(
-                &ReplyError::Succeeded,
-                SocketAddr::new(
-                    self.reply_ip.context("invalid reply ip")?,
-                    peer_sock.local_addr()?.port(),
-                ),
-            ))
-            .await
-            .context("Can't write successful reply")?;
-
-        debug!("Wrote success");
-
-        transfer_udp(peer_sock).await?;
 
         Ok(())
     }
@@ -746,9 +866,271 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
     }
 }
 
-/// Copy data between two peers
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> {
+    /// Negotiate an authentication method from a list of supported ones and initialize it.
+    ///
+    /// Internally, this reads the list of authentication methods provided by the client, and
+    /// picks the first one for which there exists an implementation in `server_methods`.
+    ///
+    /// If none of the auth methods requested by the client are in `server_methods`,
+    /// returns a `SocksServerError::AuthMethodUnacceptable`.
+    pub async fn negotiate_auth<M: AuthMethod<T>>(
+        mut self,
+        server_methods: &[M],
+    ) -> Result<M::StartingState, SocksServerError> {
+        trace!("Socks5ServerProtocol: negotiate_auth()");
+        let [version, methods_len] =
+            read_exact!(self.inner, [0u8; 2]).err_when("reading methods")?;
+        debug!(
+            "Handshake headers: [version: {version}, methods len: {len}]",
+            version = version,
+            len = methods_len,
+        );
+
+        if version != consts::SOCKS5_VERSION {
+            return Err(SocksServerError::UnsupportedSocksVersion(version));
+        }
+
+        // {METHODS available from the client}
+        // eg. (non-auth) {0, 1}
+        // eg. (auth)     {0, 1, 2}
+        let methods =
+            read_exact!(self.inner, vec![0u8; methods_len as usize]).err_when("reading methods")?;
+        debug!("methods supported sent by the client: {:?}", &methods);
+
+        // server_methods order matter!
+        // the server could choose to prioritize methods
+        for server_method in server_methods {
+            for client_method_id in methods.iter() {
+                if server_method.method_id() == *client_method_id {
+                    debug!("Reply with method {}", *client_method_id);
+                    self.inner
+                        .write_all(&[consts::SOCKS5_VERSION, *client_method_id])
+                        .await
+                        .err_when("replying with auth method")?;
+                    return Ok(server_method.new(self.inner));
+                }
+            }
+        }
+
+        debug!("No auth method supported by both client and server, reply with (0xff)");
+        self.inner
+            .write_all(&[
+                consts::SOCKS5_VERSION,
+                consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
+            ])
+            .await
+            .err_when("replying with method not acceptable")?;
+        Err(SocksServerError::AuthMethodUnacceptable(methods))
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
+    /// Reply success to the client according to the RFC.
+    /// This consumes the wrapper as after this message actual proxying should begin.
+    pub async fn reply_success(mut self, sock_addr: SocketAddr) -> Result<T, SocksServerError> {
+        self.inner
+            .write(&new_reply(&ReplyError::Succeeded, sock_addr))
+            .await
+            .err_when("writing successful reply")?;
+
+        self.inner.flush().await.err_when("flushing auth reply")?;
+
+        debug!("Wrote success");
+        Ok(self.inner)
+    }
+
+    /// Reply error to the client with the reply code according to the RFC.
+    pub async fn reply_error(mut self, error: &ReplyError) -> Result<(), SocksServerError> {
+        let reply = new_reply(error, "0.0.0.0:0".parse().unwrap());
+        debug!("reply error to be written: {:?}", &reply);
+
+        self.inner
+            .write(&reply)
+            .await
+            .err_when("writing unsuccessful reply")?;
+
+        self.inner.flush().await.err_when("flushing auth reply")?;
+
+        Ok(())
+    }
+}
+
+macro_rules! try_notify {
+    ($proto:expr, $e:expr) => {
+        match $e {
+            Ok(res) => res,
+            Err(err) => {
+                if let Err(rep_err) = $proto.reply_error(&err.to_reply_error()).await {
+                    error!(
+                        "extra error while reporting an error to the client: {}",
+                        rep_err
+                    );
+                }
+                return Err(err.into());
+            }
+        }
+    };
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenticated> {
+    /// Decide to whether or not, accept the authentication method.
+    /// Don't forget that the methods list sent by the client, contains one or more methods.
+    ///
+    /// # Request
+    /// ```text
+    ///          +----+-----+-------+------+----------+----------+
+    ///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
+    ///          +----+-----+-------+------+----------+----------+
+    ///          | 1  |  1  |   1   |  1   | Variable |    2     |
+    ///          +----+-----+-------+------+----------+----------+
+    /// ```
+    ///
+    /// It the request is correct, it should returns a ['SocketAddr'].
+    ///
+    pub async fn read_command(
+        mut self,
+    ) -> Result<
+        (
+            Socks5ServerProtocol<T, states::CommandRead>,
+            Socks5Command,
+            TargetAddr,
+        ),
+        SocksServerError,
+    > {
+        let [version, cmd, rsv, address_type] =
+            read_exact!(self.inner, [0u8; 4]).err_when("reading command")?;
+        debug!(
+            "Request: [version: {version}, command: {cmd}, rev: {rsv}, address_type: {address_type}]",
+            version = version,
+            cmd = cmd,
+            rsv = rsv,
+            address_type = address_type,
+        );
+
+        if version != consts::SOCKS5_VERSION {
+            return Err(SocksServerError::UnsupportedSocksVersion(version));
+        }
+
+        let mut proto = Socks5ServerProtocol::new(self.inner);
+
+        // Guess address type
+        let target_addr = try_notify!(proto, read_address(&mut proto.inner, address_type).await);
+
+        debug!("Request target is {}", target_addr);
+
+        let cmd = try_notify!(
+            proto,
+            Socks5Command::from_u8(cmd).ok_or(SocksServerError::UnknownCommand(cmd))
+        );
+
+        Ok((proto, cmd, target_addr))
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait DnsResolveHelper
+where
+    Self: Sized,
+{
+    async fn resolve_dns(self) -> Result<Self, SocksServerError>;
+}
+
+impl<T> DnsResolveHelper
+    for (
+        Socks5ServerProtocol<T, states::CommandRead>,
+        Socks5Command,
+        TargetAddr,
+    )
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn resolve_dns(self) -> Result<Self, SocksServerError> {
+        let (proto, cmd, target_addr) = self;
+        let resolved_addr = try_notify!(proto, target_addr.resolve_dns().await);
+        Ok((proto, cmd, resolved_addr))
+    }
+}
+
+/// Handle the connect command by running a TCP proxy until the connection is done.
+pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    addr: &TargetAddr,
+    request_timeout_s: u64,
+    nodelay: bool,
+) -> Result<T, SocksServerError> {
+    let addr = try_notify!(
+        proto,
+        addr.to_socket_addrs()
+            .err_when("converting to socket addr")
+            .and_then(|mut addrs| addrs.next().ok_or(SocksServerError::Bug("no socket addrs")))
+    );
+
+    // TCP connect with timeout, to avoid memory leak for connection that takes forever
+    let outbound = match tcp_connect_with_timeout(addr, request_timeout_s).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            proto.reply_error(&err.to_reply_error()).await?;
+            return Err(err.into());
+        }
+    };
+
+    // Disable Nagle's algorithm if config specifies to do so.
+    try_notify!(
+        proto,
+        outbound.set_nodelay(nodelay).err_when("setting nodelay")
+    );
+
+    debug!("Connected to remote destination");
+
+    let mut inner = proto
+        .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+        .await?;
+
+    transfer(&mut inner, outbound).await;
+    Ok(inner)
+}
+
+/// Handle the associate command by running a UDP proxy until the connection is done.
+pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    _addr: &TargetAddr,
+    reply_ip: IpAddr,
+) -> Result<T, SocksServerError> {
+    // The DST.ADDR and DST.PORT fields contain the address and port that
+    // the client expects to use to send UDP datagrams on for the
+    // association. The server MAY use this information to limit access
+    // to the association.
+    // @see Page 6, https://datatracker.ietf.org/doc/html/rfc1928.
+    //
+    // We do NOT limit the access from the client currently in this implementation.
+
+    // Listen with UDP6 socket, so the client can connect to it with either
+    // IPv4 or IPv6.
+    let peer_sock = try_notify!(
+        proto,
+        UdpSocket::bind("[::]:0")
+            .await
+            .err_when("binding udp socket")
+    );
+
+    let peer_addr = try_notify!(
+        proto,
+        peer_sock.local_addr().err_when("getting peer's local addr")
+    );
+
+    // Respect the pre-populated reply IP address.
+    let inner = proto
+        .reply_success(SocketAddr::new(reply_ip, peer_addr.port()))
+        .await?;
+
+    transfer_udp(peer_sock).await?;
+    Ok(inner)
+}
+
+/// Run a bidirectional proxy between two streams.
 /// Using 2 different generators, because they could be different structs with same traits.
-async fn transfer<I, O>(mut inbound: I, mut outbound: O) -> Result<()>
+pub async fn transfer<I, O>(mut inbound: I, mut outbound: O)
 where
     I: AsyncRead + AsyncWrite + Unpin,
     O: AsyncRead + AsyncWrite + Unpin,
@@ -757,16 +1139,23 @@ where
         Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
         Err(err) => error!("transfer error: {:?}", err),
     };
-
-    Ok(())
 }
 
-async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+async fn handle_udp_request(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
     let mut buf = vec![0u8; 0x10000];
     loop {
-        let (size, client_addr) = inbound.recv_from(&mut buf).await?;
+        let (size, client_addr) = inbound
+            .recv_from(&mut buf)
+            .await
+            .err_when("udp receiving from")?;
         debug!("Server recieve udp from {}", client_addr);
-        inbound.connect(client_addr).await?;
+        inbound
+            .connect(client_addr)
+            .await
+            .err_when("connecting udp inbound")?;
 
         let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
 
@@ -779,32 +1168,45 @@ async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result
         let mut target_addr = target_addr
             .resolve_dns()
             .await?
-            .to_socket_addrs()?
+            .to_socket_addrs()
+            .err_when("udp target to socket addrs")?
             .next()
-            .context("unreachable")?;
+            .ok_or(SocksServerError::Bug("no socket addrs"))?;
 
         target_addr.set_ip(match target_addr.ip() {
             std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
             v6 @ std::net::IpAddr::V6(_) => v6,
         });
-        outbound.send_to(data, target_addr).await?;
+        outbound
+            .send_to(data, target_addr)
+            .await
+            .err_when("udp sending to")?;
     }
 }
 
-async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+async fn handle_udp_response(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
     let mut buf = vec![0u8; 0x10000];
     loop {
-        let (size, remote_addr) = outbound.recv_from(&mut buf).await?;
+        let (size, remote_addr) = outbound
+            .recv_from(&mut buf)
+            .await
+            .err_when("udp receiving from")?;
         debug!("Recieve packet from {}", remote_addr);
 
         let mut data = new_udp_header(remote_addr)?;
         data.extend_from_slice(&buf[..size]);
-        inbound.send(&data).await?;
+        inbound.send(&data).await.err_when("udp sending")?;
     }
 }
 
-async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
-    let outbound = UdpSocket::bind("[::]:0").await?;
+/// Run a bidirectional UDP SOCKS proxy for a bound port.
+pub async fn transfer_udp(inbound: UdpSocket) -> Result<(), SocksServerError> {
+    let outbound = UdpSocket::bind("[::]:0")
+        .await
+        .err_when("binding udp socket")?;
 
     let req_fut = handle_udp_request(&inbound, &outbound);
     let res_fut = handle_udp_response(&inbound, &outbound);
@@ -819,9 +1221,11 @@ async fn transfer_udp(inbound: UdpSocket) -> Result<()> {
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"
 //
 // cf. https://users.rust-lang.org/t/take-in-impl-future-cannot-borrow-data-in-a-dereference-of-pin/52042
+#[allow(deprecated)]
 impl<T, A: Authentication> Unpin for Socks5Socket<T, A> where T: AsyncRead + AsyncWrite + Unpin {}
 
 /// Allow us to read directly from the struct
+#[allow(deprecated)]
 impl<T, A: Authentication> AsyncRead for Socks5Socket<T, A>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -836,6 +1240,7 @@ where
 }
 
 /// Allow us to write directly into the struct
+#[allow(deprecated)]
 impl<T, A: Authentication> AsyncWrite for Socks5Socket<T, A>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -891,6 +1296,7 @@ fn new_reply(error: &ReplyError, sock_addr: SocketAddr) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use crate::server::Socks5Server;
     use tokio_test::block_on;

@@ -46,4 +46,7 @@ name = "server"
 name = "client"
 
 [[example]]
-name = "simple_tcp_server"
+name = "custom_auth_server"
+
+[[example]]
+name = "router"

@@ -2,15 +2,15 @@
 #[macro_use]
 extern crate log;
 
+use anyhow::Context;
 use fast_socks5::{
-    server::{Config, SimpleUserPassword, Socks5Server, Socks5Socket},
-    Result, SocksError,
+    server::{run_tcp_proxy, run_udp_proxy, DnsResolveHelper as _, Socks5ServerProtocol},
+    ReplyError, Result, Socks5Command, SocksError,
 };
 use std::future::Future;
 use structopt::StructOpt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::task;
-use tokio_stream::StreamExt;
 
 /// # How to use it:
 ///
@@ -52,7 +52,7 @@ struct Opt {
 }
 
 /// Choose the authentication type
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Debug, PartialEq)]
 enum AuthMode {
     NoAuth,
     Password {
@@ -79,72 +79,77 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_server() -> Result<()> {
-    let opt: Opt = Opt::from_args();
+    let opt: &'static Opt = Box::leak(Box::new(Opt::from_args()));
     if opt.allow_udp && opt.public_addr.is_none() {
         return Err(SocksError::ArgumentInputError(
             "Can't allow UDP if public-addr is not set",
         ));
     }
+    if opt.skip_auth && opt.auth != AuthMode::NoAuth {
+        return Err(SocksError::ArgumentInputError(
+            "Can't use skip-auth flag and authentication altogether.",
+        ));
+    }
 
-    let mut config = Config::default();
-    config.set_request_timeout(opt.request_timeout);
-    config.set_skip_auth(opt.skip_auth);
-    config.set_udp_support(opt.allow_udp);
-
-    let config = match opt.auth {
-        AuthMode::NoAuth => {
-            warn!("No authentication has been set!");
-            config
-        }
-        AuthMode::Password { username, password } => {
-            if opt.skip_auth {
-                return Err(SocksError::ArgumentInputError(
-                    "Can't use skip-auth flag and authentication altogether.",
-                ));
-            }
-
-            info!("Simple auth system has been set.");
-            config.with_authentication(SimpleUserPassword { username, password })
-        }
-    };
-
-    let listener = <Socks5Server>::bind(&opt.listen_addr).await?;
-    let listener = listener.with_config(config);
-
-    let mut incoming = listener.incoming();
+    let listener = TcpListener::bind(&opt.listen_addr).await?;
 
     info!("Listen for socks connections @ {}", &opt.listen_addr);
 
     // Standard TCP loop
-    while let Some(socket_res) = incoming.next().await {
-        match socket_res {
-            Ok(mut socket) => {
-                if let Some(addr) = opt.public_addr {
-                    socket.set_reply_ip(addr);
-                }
-                spawn_and_log_error(socket.upgrade_to_socks5());
+    loop {
+        match listener.accept().await {
+            Ok((socket, _client_addr)) => {
+                spawn_and_log_error(serve_socks5(opt, socket));
             }
             Err(err) => {
                 error!("accept error = {:?}", err);
             }
         }
     }
+}
 
+async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), SocksError> {
+    let (proto, cmd, target_addr) = match &opt.auth {
+        AuthMode::NoAuth if opt.skip_auth => {
+            Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(socket)
+        }
+        AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(socket).await?,
+        AuthMode::Password { username, password } => {
+            Socks5ServerProtocol::accept_password_auth(socket, |user, pass| {
+                user == *username && pass == *password
+            })
+            .await?
+            .0
+        }
+    }
+    .read_command()
+    .await?
+    .resolve_dns()
+    .await?;
+
+    match cmd {
+        Socks5Command::TCPConnect => {
+            run_tcp_proxy(proto, &target_addr, opt.request_timeout, false).await?;
+        }
+        Socks5Command::UDPAssociate if opt.allow_udp => {
+            let reply_ip = opt.public_addr.context("invalid reply ip")?;
+            run_udp_proxy(proto, &target_addr, reply_ip).await?;
+        }
+        _ => {
+            proto.reply_error(&ReplyError::CommandNotSupported).await?;
+            return Err(ReplyError::CommandNotSupported.into());
+        }
+    };
     Ok(())
 }
 
-fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
+fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
 where
-    F: Future<Output = Result<Socks5Socket<T, SimpleUserPassword>>> + Send + 'static,
-    T: AsyncRead + AsyncWrite + Unpin,
+    F: Future<Output = Result<()>> + Send + 'static,
 {
     task::spawn(async move {
         match fut.await {
-            Ok(mut socket) => {
-                if let Some(user) = socket.take_credentials() {
-                    info!("user logged in with `{}`", user.username);
-                }
-            }
+            Ok(()) => {}
             Err(err) => error!("{:#}", &err),
         }
     })

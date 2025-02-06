@@ -53,12 +53,16 @@ pub enum SocksServerError {
     UnsupportedSocksVersion(u8),
     #[error("Unsupported SOCKS command `{0}`.")]
     UnknownCommand(u8),
+    #[error("Unexpected garbage received on TCP stream used for UDP proxy keep-alive: `{0}`")]
+    UnexpectedUdpControlGarbage(u8),
     #[error("Empty username received")]
     EmptyUsername,
     #[error("Empty password received")]
     EmptyPassword,
     #[error("Authentication rejected")]
     AuthenticationRejected,
+    #[error("End of stream")]
+    EOF,
 }
 
 impl SocksServerError {
@@ -1120,12 +1124,33 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     );
 
     // Respect the pre-populated reply IP address.
-    let inner = proto
+    let mut inner = proto
         .reply_success(SocketAddr::new(reply_ip, peer_addr.port()))
         .await?;
 
-    transfer_udp(peer_sock).await?;
+    let udp_fut = transfer_udp(peer_sock);
+    let tcp_fut = wait_on_tcp(&mut inner);
+    match try_join!(udp_fut, tcp_fut) {
+        Ok(_) => warn!("unreachable"),
+        Err(SocksServerError::EOF) => debug!("EOF on controlling TCP stream, closed UDP proxy"),
+        Err(err) => warn!("while UDP proxying: {err}"),
+    }
     Ok(inner)
+}
+
+/// Wait until a TCP stream (that's not supposed to receive anything) closes.
+///
+/// This is intended for cancelling the `transfer_udp` task.
+pub async fn wait_on_tcp<I>(stream: &mut I) -> Result<(), SocksServerError>
+where
+    I: AsyncRead + Unpin,
+{
+    let mut buf = [0; 1];
+    match stream.read(&mut buf).await {
+        Ok(0) => Err(SocksServerError::EOF),
+        Ok(_) => Err(SocksServerError::UnexpectedUdpControlGarbage(buf[0])),
+        Err(err) => Err(err).err_when("waiting on UDP control stream"),
+    }
 }
 
 /// Run a bidirectional proxy between two streams.

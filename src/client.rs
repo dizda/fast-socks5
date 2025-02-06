@@ -415,7 +415,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     where
         U: ToSocketAddrs,
     {
-        Self::bind_internal(backing_socket, client_bind_addr, None).await
+        Self::bind_internal(backing_socket, Self::create_out_sock(client_bind_addr).await?, None).await
     }
     /// Creates a UDP socket bound to the specified address which will have its
     /// traffic routed through the specified proxy. The given username and password
@@ -433,24 +433,45 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
             username: username.to_owned(),
             password: password.to_owned(),
         };
-        Self::bind_internal(backing_socket, client_bind_addr, Some(auth)).await
+        Self::bind_internal(backing_socket, Self::create_out_sock(client_bind_addr).await?, Some(auth)).await
+    }
+    /// Use a UdpSocket already created rather than creating a whole new `UdpSocket::bind`.
+    pub async fn use_socket(
+        backing_socket: S,
+        out_sock: UdpSocket,
+    ) -> Result<Socks5Datagram<S>> {
+        Self::bind_internal(backing_socket, out_sock, None).await
+    }
+    /// Same as `use_socket` but with credentials.
+    pub async fn use_socket_with_password(
+        backing_socket: S,
+        out_sock: UdpSocket,
+        username: &str,
+        password: &str,
+    ) -> Result<Socks5Datagram<S>> {
+        let auth = AuthenticationMethod::Password {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        };
+        Self::bind_internal(backing_socket, out_sock, Some(auth)).await
     }
 
-    async fn bind_internal<U>(
-        backing_socket: S,
-        client_bind_addr: U,
-        auth: Option<AuthenticationMethod>,
-    ) -> Result<Socks5Datagram<S>>
-    where
-        U: ToSocketAddrs,
-    {
+    async fn create_out_sock<U: ToSocketAddrs>(client_bind_addr: U) -> Result<UdpSocket> {
         let client_bind_addr = client_bind_addr
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;
         let out_sock = UdpSocket::bind(client_bind_addr).await?;
         info!("UdpSocket client socket bind to {}", client_bind_addr);
+        Ok(out_sock)
+    }
 
+    async fn bind_internal(
+        backing_socket: S,
+        out_sock: UdpSocket,
+        auth: Option<AuthenticationMethod>,
+    ) -> Result<Socks5Datagram<S>>
+    {
         // Init socks5 stream.
         let mut proxy_stream =
             Socks5Stream::use_stream(backing_socket, auth, Config::default()).await?;

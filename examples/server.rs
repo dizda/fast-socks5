@@ -20,6 +20,8 @@ use tokio::task;
 /// Listen on a local address, with basic username/password requirement:
 ///     `$ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 password --username admin --password password`
 ///
+/// Same as above but with UDP support
+///     `$ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 --allow-udp --public-addr 127.0.0.1 password --username admin --password password`
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "socks5-server",

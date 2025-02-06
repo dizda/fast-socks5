@@ -1,4 +1,4 @@
-# SOCKS5 client/server library using async/.await
+# A SOCKS5 client/server library using async/.await
 [![License](https://img.shields.io/github/license/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5)
 [![crates.io](https://img.shields.io/crates/v/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
 [![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
@@ -29,6 +29,12 @@ This library is maintained by [anyip.io](https://anyip.io/) a residential and mo
 - UDP is supported
 - All SOCKS5 RFC errors (replies) should be mapped
 - `IPv4`, `IPv6`, and `Domains` types are supported
+- Exhaustive [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) are provided that can be run immediately:
+  - client
+  - server
+  - custom_auth_server
+  - router
+  - udp_client
 
 
 ## Install
@@ -51,9 +57,6 @@ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 passwo
 curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
 ```
 
-## TODO
-- Tests have to be implemented
-- Better Rust doc
 
 ## Inspired by
 
@@ -63,6 +66,6 @@ Thanks to all these SOCKS5 projects
 - https://github.com/shadowsocks/shadowsocks-rust/blob/master/src/relay/socks5.rs
 - https://github.com/ylxdzsw/v2socks/blob/master/src/socks.rs
 
-## Further consideration
+## Further Considerations
 
 - Implementation made with Tokio-codec https://github.com/yfaming/yimu-rs/blob/master/src/socks5.rs

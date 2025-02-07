@@ -68,7 +68,7 @@ impl SocksServerError {
     }
 }
 
-trait ErrorContext<T> {
+pub trait ErrorContext<T> {
     fn err_when(self, context: &'static str) -> Result<T, SocksServerError>;
 }
 

@@ -1098,9 +1098,26 @@ pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
 /// Handle the associate command by running a UDP proxy until the connection is done.
 pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     proto: Socks5ServerProtocol<T, states::CommandRead>,
-    _addr: &TargetAddr,
+    addr: &TargetAddr,
     reply_ip: IpAddr,
 ) -> Result<T, SocksServerError> {
+    run_udp_proxy_custom(proto, addr, reply_ip, transfer_udp).await
+}
+
+/// Handle the associate command by running a UDP proxy until the connection is done.
+///
+/// This version allows passing in a custom transfer function while reusing the initialization code.
+pub async fn run_udp_proxy_custom<T, F, R>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    _addr: &TargetAddr,
+    reply_ip: IpAddr,
+    transfer: F,
+) -> Result<T, SocksServerError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(UdpSocket) -> R,
+    R: Future<Output = Result<(), SocksServerError>>,
+{
     // The DST.ADDR and DST.PORT fields contain the address and port that
     // the client expects to use to send UDP datagrams on for the
     // association. The server MAY use this information to limit access
@@ -1128,7 +1145,7 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
         .reply_success(SocketAddr::new(reply_ip, peer_addr.port()))
         .await?;
 
-    let udp_fut = transfer_udp(peer_sock);
+    let udp_fut = transfer(peer_sock);
     let tcp_fut = wait_on_tcp(&mut inner);
     match try_join!(udp_fut, tcp_fut) {
         Ok(_) => warn!("unreachable"),

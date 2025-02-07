@@ -216,6 +216,12 @@ impl ToTargetAddr for (Ipv6Addr, u16) {
     }
 }
 
+impl ToTargetAddr for TargetAddr {
+    fn to_target_addr(&self) -> io::Result<TargetAddr> {
+        Ok(self.clone())
+    }
+}
+
 #[derive(Debug)]
 pub enum Addr {
     V4([u8; 4]),

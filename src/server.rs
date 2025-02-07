@@ -1169,61 +1169,86 @@ where
 async fn handle_udp_request(
     inbound: &UdpSocket,
     outbound: &UdpSocket,
+    buf: &mut [u8],
 ) -> Result<(), SocksServerError> {
-    let mut buf = vec![0u8; 0x10000];
+    let (size, client_addr) = inbound
+        .recv_from(buf)
+        .await
+        .err_when("udp receiving from")?;
+    debug!("Server recieve udp from {}", client_addr);
+    inbound
+        .connect(client_addr)
+        .await
+        .err_when("connecting udp inbound")?;
+
+    let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
+
+    if frag != 0 {
+        debug!("Discard UDP frag packets sliently.");
+        return Ok(());
+    }
+
+    debug!("Server forward to packet to {}", target_addr);
+    let mut target_addr = target_addr
+        .resolve_dns()
+        .await?
+        .to_socket_addrs()
+        .err_when("udp target to socket addrs")?
+        .next()
+        .ok_or(SocksServerError::Bug("no socket addrs"))?;
+
+    target_addr.set_ip(match target_addr.ip() {
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
+        v6 @ std::net::IpAddr::V6(_) => v6,
+    });
+    outbound
+        .send_to(data, target_addr)
+        .await
+        .err_when("udp sending to")?;
+    Ok(())
+}
+
+async fn handle_udp_requests(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
+    let mut buf = vec![0u8; 8192];
     loop {
-        let (size, client_addr) = inbound
-            .recv_from(&mut buf)
-            .await
-            .err_when("udp receiving from")?;
-        debug!("Server recieve udp from {}", client_addr);
-        inbound
-            .connect(client_addr)
-            .await
-            .err_when("connecting udp inbound")?;
-
-        let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
-
-        if frag != 0 {
-            debug!("Discard UDP frag packets sliently.");
-            return Ok(());
+        match handle_udp_request(inbound, outbound, &mut buf).await {
+            Ok(_) => trace!("handled udp response"),
+            Err(err) => debug!("error in handling udp response: {err}"),
         }
-
-        debug!("Server forward to packet to {}", target_addr);
-        let mut target_addr = target_addr
-            .resolve_dns()
-            .await?
-            .to_socket_addrs()
-            .err_when("udp target to socket addrs")?
-            .next()
-            .ok_or(SocksServerError::Bug("no socket addrs"))?;
-
-        target_addr.set_ip(match target_addr.ip() {
-            std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
-            v6 @ std::net::IpAddr::V6(_) => v6,
-        });
-        outbound
-            .send_to(data, target_addr)
-            .await
-            .err_when("udp sending to")?;
     }
 }
 
 async fn handle_udp_response(
     inbound: &UdpSocket,
     outbound: &UdpSocket,
+    buf: &mut [u8],
 ) -> Result<(), SocksServerError> {
-    let mut buf = vec![0u8; 0x10000];
-    loop {
-        let (size, remote_addr) = outbound
-            .recv_from(&mut buf)
-            .await
-            .err_when("udp receiving from")?;
-        debug!("Recieve packet from {}", remote_addr);
+    let (size, remote_addr) = outbound
+        .recv_from(buf)
+        .await
+        .err_when("udp receiving from")?;
+    debug!("Recieve packet from {}", remote_addr);
 
-        let mut data = new_udp_header(remote_addr)?;
-        data.extend_from_slice(&buf[..size]);
-        inbound.send(&data).await.err_when("udp sending")?;
+    let mut data = new_udp_header(remote_addr)?;
+    data.extend_from_slice(&buf[..size]);
+    inbound.send(&data).await.err_when("udp sending")?;
+
+    Ok(())
+}
+
+async fn handle_udp_responses(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match handle_udp_response(inbound, outbound, &mut buf).await {
+            Ok(_) => trace!("handled udp response"),
+            Err(err) => debug!("error in handling udp response: {err}"),
+        }
     }
 }
 
@@ -1233,14 +1258,9 @@ pub async fn transfer_udp(inbound: UdpSocket) -> Result<(), SocksServerError> {
         .await
         .err_when("binding udp socket")?;
 
-    let req_fut = handle_udp_request(&inbound, &outbound);
-    let res_fut = handle_udp_response(&inbound, &outbound);
-    match try_join!(req_fut, res_fut) {
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
-
-    Ok(())
+    let req_fut = handle_udp_requests(&inbound, &outbound);
+    let res_fut = handle_udp_responses(&inbound, &outbound);
+    try_join!(req_fut, res_fut).map(|_| ())
 }
 
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"

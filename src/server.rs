@@ -5,6 +5,7 @@ use crate::{
     Socks5Command, SocksError, UdpHeaderError,
 };
 use anyhow::Context;
+use socket2::{Domain, Socket, Type};
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
@@ -1089,6 +1090,26 @@ pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     Ok(inner)
 }
 
+fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
+    if let Some(addr) = addr {
+        let sock_addr = SocketAddr::new(addr, 0);
+        let socket = Socket::new(Domain::for_address(sock_addr), Type::DGRAM, None)?;
+        socket.bind(&sock_addr.into())?;
+        Ok(socket)
+    } else {
+        const V4_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        const V6_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        Socket::new(Domain::IPV6, Type::DGRAM, None)
+            .and_then(|socket| socket.set_only_v6(false).map(|_| socket))
+            .and_then(|socket| socket.bind(&V6_UNSPEC.into()).map(|_| socket))
+            .or_else(|_| {
+                Socket::new(Domain::IPV4, Type::DGRAM, None)
+                    .and_then(|socket| socket.bind(&V4_UNSPEC.into()).map(|_| socket))
+            })
+    }
+    .and_then(|socket| socket.set_nonblocking(true).map(|_| socket))
+}
+
 /// Handle the associate command by running a UDP proxy until the connection is done.
 pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     proto: Socks5ServerProtocol<T, states::CommandRead>,
@@ -1097,16 +1118,14 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     reply_ip: IpAddr,
     outbound_bind_ip: Option<IpAddr>,
 ) -> Result<T, SocksServerError> {
-    let outbound_bind_ip = outbound_bind_ip.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
     run_udp_proxy_custom(
         proto,
         addr,
         peer_bind_ip,
         reply_ip,
         move |inbound| async move {
-            let outbound = UdpSocket::bind(SocketAddr::new(outbound_bind_ip, 0))
-                .await
-                .err_when("binding udp socket")?;
+            let outbound =
+                udp_bind_random_port(outbound_bind_ip).err_when("binding outbound udp socket")?;
 
             transfer_udp(inbound, outbound).await
         },
@@ -1126,7 +1145,7 @@ pub async fn run_udp_proxy_custom<T, F, R>(
 ) -> Result<T, SocksServerError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
-    F: FnOnce(UdpSocket) -> R,
+    F: FnOnce(Socket) -> R,
     R: Future<Output = Result<(), SocksServerError>>,
 {
     // The DST.ADDR and DST.PORT fields contain the address and port that
@@ -1141,12 +1160,7 @@ where
     // to it with either IPv4 or IPv6.
     let peer_sock = try_notify!(
         proto,
-        UdpSocket::bind(SocketAddr::new(
-            peer_bind_ip.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
-            0
-        ))
-        .await
-        .err_when("binding udp socket")
+        udp_bind_random_port(peer_bind_ip).err_when("binding client udp socket")
     );
 
     let peer_addr = try_notify!(
@@ -1154,9 +1168,14 @@ where
         peer_sock.local_addr().err_when("getting peer's local addr")
     );
 
+    let reply_port = peer_addr
+        .as_socket()
+        .ok_or(SocksServerError::Bug("addr not IP"))?
+        .port();
+
     // Respect the pre-populated reply IP address.
     let mut inner = proto
-        .reply_success(SocketAddr::new(reply_ip, peer_addr.port()))
+        .reply_success(SocketAddr::new(reply_ip, reply_port))
         .await?;
 
     let udp_fut = transfer(peer_sock);
@@ -1291,7 +1310,9 @@ async fn handle_udp_responses(
 }
 
 /// Run a bidirectional UDP SOCKS proxy for a given pair of inbound (SOCKS client) and outbound sockets.
-pub async fn transfer_udp(inbound: UdpSocket, outbound: UdpSocket) -> Result<(), SocksServerError> {
+pub async fn transfer_udp(inbound: Socket, outbound: Socket) -> Result<(), SocksServerError> {
+    let inbound = UdpSocket::from_std(inbound.into()).err_when("wrapping inbound socket")?;
+    let outbound = UdpSocket::from_std(outbound.into()).err_when("wrapping outbound socket")?;
     let req_fut = handle_udp_requests(&inbound, &outbound);
     let res_fut = handle_udp_responses(&inbound, &outbound);
     try_join!(req_fut, res_fut).map(|_| ())

@@ -1,30 +1,21 @@
-use crate::new_udp_header;
-use crate::parse_udp_request;
-use crate::read_exact;
-use crate::ready;
-use crate::util::stream::tcp_connect_with_timeout;
-use crate::util::stream::ConnectError;
-use crate::util::target_addr::AddrError;
-use crate::util::target_addr::{read_address, TargetAddr};
-use crate::Socks5Command;
-use crate::UdpHeaderError;
-use crate::{consts, AuthenticationMethod, ReplyError, SocksError};
+use crate::util::stream::{tcp_connect_with_timeout, ConnectError};
+use crate::util::target_addr::{read_address, AddrError, TargetAddr};
+use crate::{
+    consts, new_udp_header, parse_udp_request, read_exact, ready, AuthenticationMethod, ReplyError,
+    Socks5Command, SocksError, UdpHeaderError,
+};
 use anyhow::Context;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
-use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UdpSocket;
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs, UdpSocket};
 use tokio::try_join;
 use tokio_stream::Stream;
 

@@ -1283,11 +1283,18 @@ async fn handle_udp_response(
     outbound: &UdpSocket,
     buf: &mut [u8],
 ) -> Result<(), SocksServerError> {
-    let (size, remote_addr) = outbound
+    let (size, mut remote_addr) = outbound
         .recv_from(buf)
         .await
         .err_when("udp receiving from")?;
     debug!("Recieve packet from {}", remote_addr);
+
+    // Clients don't tend to expect v6-mapped addresses when they connect to v4 ones
+    if let std::net::IpAddr::V6(v6) = remote_addr.ip() {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            remote_addr.set_ip(std::net::IpAddr::V4(v4));
+        }
+    }
 
     let mut data = new_udp_header(remote_addr)?;
     data.extend_from_slice(&buf[..size]);

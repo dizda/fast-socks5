@@ -45,6 +45,8 @@
   - udp_client
 
 
+This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
+
 ## Install
 
 Open in [crates.io](https://crates.io/crates/fast-socks5).
@@ -77,7 +79,3 @@ Thanks to all these SOCKS5 projects
 ## Further Considerations
 
 - Implementation made with Tokio-codec https://github.com/yfaming/yimu-rs/blob/master/src/socks5.rs
-
-## Sponsorship
-
-This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.

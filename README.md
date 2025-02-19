@@ -1,10 +1,20 @@
-# A SOCKS5 client/server library using async/.await
 [![License](https://img.shields.io/github/license/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5)
 [![crates.io](https://img.shields.io/crates/v/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
 [![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
 [![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
 
+<h1 align="center">
+  <br>
+  <a href="https://anyip.io/"><img src="https://assets-global.website-files.com/64c7ccf18389fcc8fd4af160/64f8176e020b388c460e193a_logo-white.svg" alt="anyIP Proxy" width="200"></a>
+  <br>
+</h1>
+
 This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
+
+<h4 align="center">Fast SOCKS5 TCP and UDP client/server library for Rust async (Tokio)</h4>
+
+---
+
 
 ## Features
 

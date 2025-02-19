@@ -9,8 +9,6 @@
   <br>
 </h1>
 
-This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
-
 <h4 align="center">Fast SOCKS5 TCP and UDP client/server library for Rust async (Tokio)</h4>
 
 ---
@@ -79,3 +77,7 @@ Thanks to all these SOCKS5 projects
 ## Further Considerations
 
 - Implementation made with Tokio-codec https://github.com/yfaming/yimu-rs/blob/master/src/socks5.rs
+
+## Sponsorship
+
+This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.

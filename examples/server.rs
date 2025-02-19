@@ -135,7 +135,7 @@ async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), So
         }
         Socks5Command::UDPAssociate if opt.allow_udp => {
             let reply_ip = opt.public_addr.context("invalid reply ip")?;
-            run_udp_proxy(proto, &target_addr, reply_ip).await?;
+            run_udp_proxy(proto, &target_addr, None, reply_ip, None).await?;
         }
         _ => {
             proto.reply_error(&ReplyError::CommandNotSupported).await?;

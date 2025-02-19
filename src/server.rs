@@ -1,29 +1,22 @@
-use crate::new_udp_header;
-use crate::parse_udp_request;
-use crate::read_exact;
-use crate::ready;
-use crate::util::stream::tcp_connect_with_timeout;
-use crate::util::stream::ConnectError;
-use crate::util::target_addr::AddrError;
-use crate::util::target_addr::{read_address, TargetAddr};
-use crate::Socks5Command;
-use crate::UdpHeaderError;
-use crate::{consts, AuthenticationMethod, ReplyError, SocksError};
+use crate::util::stream::{tcp_connect_with_timeout, ConnectError};
+use crate::util::target_addr::{read_address, AddrError, TargetAddr};
+use crate::{
+    consts, new_udp_header, parse_udp_request, read_exact, ready, AuthenticationMethod, ReplyError,
+    Socks5Command, SocksError, UdpHeaderError,
+};
 use anyhow::Context;
+use socket2::{Domain, Socket, Type};
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::{SocketAddr, ToSocketAddrs as StdToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as StdToSocketAddrs};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UdpSocket;
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs, UdpSocket};
 use tokio::try_join;
 use tokio_stream::Stream;
 
@@ -53,12 +46,16 @@ pub enum SocksServerError {
     UnsupportedSocksVersion(u8),
     #[error("Unsupported SOCKS command `{0}`.")]
     UnknownCommand(u8),
+    #[error("Unexpected garbage received on TCP stream used for UDP proxy keep-alive: `{0}`")]
+    UnexpectedUdpControlGarbage(u8),
     #[error("Empty username received")]
     EmptyUsername,
     #[error("Empty password received")]
     EmptyPassword,
     #[error("Authentication rejected")]
     AuthenticationRejected,
+    #[error("End of stream")]
+    EOF,
 }
 
 impl SocksServerError {
@@ -71,7 +68,7 @@ impl SocksServerError {
     }
 }
 
-trait ErrorContext<T> {
+pub trait ErrorContext<T> {
     fn err_when(self, context: &'static str) -> Result<T, SocksServerError>;
 }
 
@@ -806,7 +803,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin, A: Authentication> Socks5Socket<T, A> {
                 self.inner = run_udp_proxy(
                     proto,
                     &target_addr,
+                    None,
                     self.reply_ip.context("invalid reply ip")?,
+                    None,
                 )
                 .await?;
             }
@@ -1091,12 +1090,64 @@ pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     Ok(inner)
 }
 
+fn udp_bind_random_port(addr: Option<IpAddr>) -> io::Result<Socket> {
+    if let Some(addr) = addr {
+        let sock_addr = SocketAddr::new(addr, 0);
+        let socket = Socket::new(Domain::for_address(sock_addr), Type::DGRAM, None)?;
+        socket.bind(&sock_addr.into())?;
+        Ok(socket)
+    } else {
+        const V4_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        const V6_UNSPEC: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        Socket::new(Domain::IPV6, Type::DGRAM, None)
+            .and_then(|socket| socket.set_only_v6(false).map(|_| socket))
+            .and_then(|socket| socket.bind(&V6_UNSPEC.into()).map(|_| socket))
+            .or_else(|_| {
+                Socket::new(Domain::IPV4, Type::DGRAM, None)
+                    .and_then(|socket| socket.bind(&V4_UNSPEC.into()).map(|_| socket))
+            })
+    }
+    .and_then(|socket| socket.set_nonblocking(true).map(|_| socket))
+}
+
 /// Handle the associate command by running a UDP proxy until the connection is done.
 pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     proto: Socks5ServerProtocol<T, states::CommandRead>,
-    _addr: &TargetAddr,
+    addr: &TargetAddr,
+    peer_bind_ip: Option<IpAddr>,
     reply_ip: IpAddr,
+    outbound_bind_ip: Option<IpAddr>,
 ) -> Result<T, SocksServerError> {
+    run_udp_proxy_custom(
+        proto,
+        addr,
+        peer_bind_ip,
+        reply_ip,
+        move |inbound| async move {
+            let outbound =
+                udp_bind_random_port(outbound_bind_ip).err_when("binding outbound udp socket")?;
+
+            transfer_udp(inbound, outbound).await
+        },
+    )
+    .await
+}
+
+/// Handle the associate command by running a UDP proxy until the connection is done.
+///
+/// This version allows passing in a custom transfer function while reusing the initialization code.
+pub async fn run_udp_proxy_custom<T, F, R>(
+    proto: Socks5ServerProtocol<T, states::CommandRead>,
+    _addr: &TargetAddr,
+    peer_bind_ip: Option<IpAddr>,
+    reply_ip: IpAddr,
+    transfer: F,
+) -> Result<T, SocksServerError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(Socket) -> R,
+    R: Future<Output = Result<(), SocksServerError>>,
+{
     // The DST.ADDR and DST.PORT fields contain the address and port that
     // the client expects to use to send UDP datagrams on for the
     // association. The server MAY use this information to limit access
@@ -1105,13 +1156,11 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     //
     // We do NOT limit the access from the client currently in this implementation.
 
-    // Listen with UDP6 socket, so the client can connect to it with either
-    // IPv4 or IPv6.
+    // By default, listen on a UDP6 socket, so that the client can connect
+    // to it with either IPv4 or IPv6.
     let peer_sock = try_notify!(
         proto,
-        UdpSocket::bind("[::]:0")
-            .await
-            .err_when("binding udp socket")
+        udp_bind_random_port(peer_bind_ip).err_when("binding client udp socket")
     );
 
     let peer_addr = try_notify!(
@@ -1119,13 +1168,39 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
         peer_sock.local_addr().err_when("getting peer's local addr")
     );
 
+    let reply_port = peer_addr
+        .as_socket()
+        .ok_or(SocksServerError::Bug("addr not IP"))?
+        .port();
+
     // Respect the pre-populated reply IP address.
-    let inner = proto
-        .reply_success(SocketAddr::new(reply_ip, peer_addr.port()))
+    let mut inner = proto
+        .reply_success(SocketAddr::new(reply_ip, reply_port))
         .await?;
 
-    transfer_udp(peer_sock).await?;
+    let udp_fut = transfer(peer_sock);
+    let tcp_fut = wait_on_tcp(&mut inner);
+    match try_join!(udp_fut, tcp_fut) {
+        Ok(_) => warn!("unreachable"),
+        Err(SocksServerError::EOF) => debug!("EOF on controlling TCP stream, closed UDP proxy"),
+        Err(err) => warn!("while UDP proxying: {err}"),
+    }
     Ok(inner)
+}
+
+/// Wait until a TCP stream (that's not supposed to receive anything) closes.
+///
+/// This is intended for cancelling the `transfer_udp` task.
+pub async fn wait_on_tcp<I>(stream: &mut I) -> Result<(), SocksServerError>
+where
+    I: AsyncRead + Unpin,
+{
+    let mut buf = [0; 1];
+    match stream.read(&mut buf).await {
+        Ok(0) => Err(SocksServerError::EOF),
+        Ok(_) => Err(SocksServerError::UnexpectedUdpControlGarbage(buf[0])),
+        Err(err) => Err(err).err_when("waiting on UDP control stream"),
+    }
 }
 
 /// Run a bidirectional proxy between two streams.
@@ -1144,78 +1219,110 @@ where
 async fn handle_udp_request(
     inbound: &UdpSocket,
     outbound: &UdpSocket,
+    outbound_v6: bool,
+    buf: &mut [u8],
 ) -> Result<(), SocksServerError> {
-    let mut buf = vec![0u8; 0x10000];
-    loop {
-        let (size, client_addr) = inbound
-            .recv_from(&mut buf)
-            .await
-            .err_when("udp receiving from")?;
-        debug!("Server recieve udp from {}", client_addr);
-        inbound
-            .connect(client_addr)
-            .await
-            .err_when("connecting udp inbound")?;
+    let (size, client_addr) = inbound
+        .recv_from(buf)
+        .await
+        .err_when("udp receiving from")?;
+    debug!("Server recieve udp from {}", client_addr);
+    inbound
+        .connect(client_addr)
+        .await
+        .err_when("connecting udp inbound")?;
 
-        let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
+    let (frag, target_addr, data) = parse_udp_request(&buf[..size]).await?;
 
-        if frag != 0 {
-            debug!("Discard UDP frag packets sliently.");
-            return Ok(());
-        }
+    if frag != 0 {
+        debug!("Discard UDP frag packets sliently.");
+        return Ok(());
+    }
 
-        debug!("Server forward to packet to {}", target_addr);
-        let mut target_addr = target_addr
-            .resolve_dns()
-            .await?
-            .to_socket_addrs()
-            .err_when("udp target to socket addrs")?
-            .next()
-            .ok_or(SocksServerError::Bug("no socket addrs"))?;
+    debug!("Server forward to packet to {}", target_addr);
+    let mut target_addr = target_addr
+        .resolve_dns()
+        .await?
+        .to_socket_addrs()
+        .err_when("udp target to socket addrs")?
+        .next()
+        .ok_or(SocksServerError::Bug("no socket addrs"))?;
 
+    if outbound_v6 {
         target_addr.set_ip(match target_addr.ip() {
             std::net::IpAddr::V4(v4) => std::net::IpAddr::V6(v4.to_ipv6_mapped()),
             v6 @ std::net::IpAddr::V6(_) => v6,
         });
-        outbound
-            .send_to(data, target_addr)
-            .await
-            .err_when("udp sending to")?;
+    }
+    outbound
+        .send_to(data, target_addr)
+        .await
+        .err_when("udp sending to")?;
+    Ok(())
+}
+
+async fn handle_udp_requests(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
+    let mut buf = vec![0u8; 8192];
+    let outbound_v6 = outbound
+        .local_addr()
+        .err_when("udp outbound local addr")?
+        .is_ipv6();
+    loop {
+        match handle_udp_request(inbound, outbound, outbound_v6, &mut buf).await {
+            Ok(_) => trace!("handled udp response"),
+            Err(err) => debug!("error in handling udp response: {err}"),
+        }
     }
 }
 
 async fn handle_udp_response(
     inbound: &UdpSocket,
     outbound: &UdpSocket,
+    buf: &mut [u8],
 ) -> Result<(), SocksServerError> {
-    let mut buf = vec![0u8; 0x10000];
-    loop {
-        let (size, remote_addr) = outbound
-            .recv_from(&mut buf)
-            .await
-            .err_when("udp receiving from")?;
-        debug!("Recieve packet from {}", remote_addr);
+    let (size, mut remote_addr) = outbound
+        .recv_from(buf)
+        .await
+        .err_when("udp receiving from")?;
+    debug!("Recieve packet from {}", remote_addr);
 
-        let mut data = new_udp_header(remote_addr)?;
-        data.extend_from_slice(&buf[..size]);
-        inbound.send(&data).await.err_when("udp sending")?;
+    // Clients don't tend to expect v6-mapped addresses when they connect to v4 ones
+    if let std::net::IpAddr::V6(v6) = remote_addr.ip() {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            remote_addr.set_ip(std::net::IpAddr::V4(v4));
+        }
+    }
+
+    let mut data = new_udp_header(remote_addr)?;
+    data.extend_from_slice(&buf[..size]);
+    inbound.send(&data).await.err_when("udp sending")?;
+
+    Ok(())
+}
+
+async fn handle_udp_responses(
+    inbound: &UdpSocket,
+    outbound: &UdpSocket,
+) -> Result<(), SocksServerError> {
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match handle_udp_response(inbound, outbound, &mut buf).await {
+            Ok(_) => trace!("handled udp response"),
+            Err(err) => debug!("error in handling udp response: {err}"),
+        }
     }
 }
 
-/// Run a bidirectional UDP SOCKS proxy for a bound port.
-pub async fn transfer_udp(inbound: UdpSocket) -> Result<(), SocksServerError> {
-    let outbound = UdpSocket::bind("[::]:0")
-        .await
-        .err_when("binding udp socket")?;
-
-    let req_fut = handle_udp_request(&inbound, &outbound);
-    let res_fut = handle_udp_response(&inbound, &outbound);
-    match try_join!(req_fut, res_fut) {
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
-
-    Ok(())
+/// Run a bidirectional UDP SOCKS proxy for a given pair of inbound (SOCKS client) and outbound sockets.
+pub async fn transfer_udp(inbound: Socket, outbound: Socket) -> Result<(), SocksServerError> {
+    let inbound = UdpSocket::from_std(inbound.into()).err_when("wrapping inbound socket")?;
+    let outbound = UdpSocket::from_std(outbound.into()).err_when("wrapping outbound socket")?;
+    let req_fut = handle_udp_requests(&inbound, &outbound);
+    let res_fut = handle_udp_responses(&inbound, &outbound);
+    try_join!(req_fut, res_fut).map(|_| ())
 }
 
 // Fixes the issue "cannot borrow data in dereference of `Pin<&mut >` as mutable"

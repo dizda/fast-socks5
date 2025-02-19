@@ -379,7 +379,7 @@ mod test {
                     server::run_tcp_proxy(proto, &target_addr, 10, false).await?;
                 }
                 Socks5Command::UDPAssociate => {
-                    server::run_udp_proxy(proto, &target_addr, reply_ip).await?;
+                    server::run_udp_proxy(proto, &target_addr, None, reply_ip, None).await?;
                 }
                 Socks5Command::TCPBind => {
                     proto.reply_error(&ReplyError::CommandNotSupported).await?;

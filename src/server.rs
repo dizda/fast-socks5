@@ -478,11 +478,11 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// same with accept_password_auth, but async.
     pub async fn accept_password_auth_async<F, R>(
         inner: T,
-        mut check: F,
+        check: F,
     ) -> Result<(Self, R), SocksServerError>
     where
         T: AsyncWrite + AsyncRead + Unpin,
-        F: AsyncFnMut(String, String) -> R,
+        F: AsyncFnOnce(String, String) -> R,
         R: CheckResult,
     {
         let (user, pass, auth) = Socks5ServerProtocol::start(inner)

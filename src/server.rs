@@ -450,6 +450,8 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// and verify the provided username and password using the provided closure.
     ///
     /// The closure can mutate state variables and/or return a result as `Option`/`Result`.
+    /// 
+    /// If this function undergoes any modifications, please apply the same changes to the accept_password_auth_async as well.
     pub async fn accept_password_auth<F, R>(
         inner: T,
         mut check: F,
@@ -465,6 +467,30 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
             .read_username_password()
             .await?;
         let check_result = check(user, pass);
+        if check_result.is_good() {
+            Ok((auth.accept().await?.finish_auth(), check_result))
+        } else {
+            auth.reject().await?;
+            Err(SocksServerError::AuthenticationRejected)
+        }
+    }
+
+    /// same with accept_password_auth, but async.
+    pub async fn accept_password_auth_async<F, R>(
+        inner: T,
+        mut check: F,
+    ) -> Result<(Self, R), SocksServerError>
+    where
+        T: AsyncWrite + AsyncRead + Unpin,
+        F: AsyncFnMut(String, String) -> R,
+        R: CheckResult,
+    {
+        let (user, pass, auth) = Socks5ServerProtocol::start(inner)
+            .negotiate_auth(&[PasswordAuthentication])
+            .await?
+            .read_username_password()
+            .await?;
+        let check_result = check(user, pass).await;
         if check_result.is_good() {
             Ok((auth.accept().await?.finish_auth(), check_result))
         } else {

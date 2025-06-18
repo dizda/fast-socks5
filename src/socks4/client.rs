@@ -190,7 +190,7 @@ impl Socks4Stream<TcpStream> {
                 .context("unreachable")?,
         )
         .await?;
-        info!("Connected @ {}", &socket.peer_addr()?);
+        debug!("Connected @ {}", &socket.peer_addr()?);
 
         // Specify the target, here domain name, dns will be resolved on the server side
         let target_addr = (target_addr.as_str(), target_port)

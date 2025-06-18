@@ -100,7 +100,7 @@ where
         self.target_addr = Some(target_addr);
 
         // Request Lifecycle
-        info!("Requesting headers `{:?}`...", &self.target_addr);
+        debug!("Requesting headers `{:?}`...", &self.target_addr);
         self.request_header(cmd).await?;
         let bind_addr = self.read_request_reply().await?;
 
@@ -181,7 +181,7 @@ where
         }
 
         match method {
-            consts::SOCKS5_AUTH_METHOD_NONE => info!("No auth will be used"),
+            consts::SOCKS5_AUTH_METHOD_NONE => debug!("No auth will be used"),
             consts::SOCKS5_AUTH_METHOD_PASSWORD => self.use_password_auth(methods).await?,
             _ => {
                 debug!("Don't support this auth method, reply with (0xff)");
@@ -201,7 +201,7 @@ where
     }
 
     async fn use_password_auth(&mut self, methods: Vec<AuthenticationMethod>) -> Result<()> {
-        info!("Password will be used");
+        debug!("Password will be used");
         let (username, password) = match methods.get(1) {
             Some(AuthenticationMethod::None) => unreachable!(),
             Some(AuthenticationMethod::Password {
@@ -363,7 +363,7 @@ where
         }
 
         let address = read_address(&mut self.socket, address_type).await?;
-        info!("Remote server bind on {}.", address);
+        debug!("Remote server bind on {}.", address);
 
         Ok(address)
     }
@@ -462,7 +462,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
             .next()
             .context("unreachable")?;
         let out_sock = UdpSocket::bind(client_bind_addr).await?;
-        info!("UdpSocket client socket bind to {}", client_bind_addr);
+        debug!("UdpSocket client socket bind to {}", client_bind_addr);
         Ok(out_sock)
     }
 
@@ -487,9 +487,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;
-        info!("UdpSocket client connecting to {}", proxy_addr_resolved);
+        debug!("UdpSocket client connecting to {}", proxy_addr_resolved);
         out_sock.connect(proxy_addr_resolved).await?;
-        info!("UdpSocket client connected");
+        debug!("UdpSocket client connected");
 
         Ok(Socks5Datagram {
             socket: out_sock,
@@ -622,7 +622,7 @@ impl Socks5Stream<TcpStream> {
             None => tcp_connect(addr).await?,
             Some(connect_timeout) => tcp_connect_with_timeout(addr, connect_timeout).await?,
         };
-        info!("Connected @ {}", &socket.peer_addr()?);
+        debug!("Connected @ {}", &socket.peer_addr()?);
 
         // Specify the target, here domain name, dns will be resolved on the server side
         let target_addr = (target_addr.as_str(), target_port)

@@ -611,7 +611,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
             .await
             .err_when("replying auth success")?;
 
-        info!("Password authentication accepted.");
+        debug!("Password authentication accepted.");
         Ok(PasswordAuthenticationImpl::new(self.inner))
     }
 
@@ -622,7 +622,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
             .await
             .err_when("replying with auth method not acceptable")?;
 
-        info!("Password authentication rejected.");
+        debug!("Password authentication rejected.");
         Ok(())
     }
 }
@@ -1211,7 +1211,7 @@ where
     O: AsyncRead + AsyncWrite + Unpin,
 {
     match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
-        Ok(res) => info!("transfer closed ({}, {})", res.0, res.1),
+        Ok(res) => debug!("transfer closed ({}, {})", res.0, res.1),
         Err(err) => error!("transfer error: {:?}", err),
     };
 }

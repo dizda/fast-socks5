@@ -12,9 +12,18 @@ def parse_dns_response(response_data):
     response = dns.message.from_wire(response_data)
     return response
 
-# Setup SOCKS connection
+# Setup SOCKS connection with username/password authentication
 s = socks.socksocket(socket.AF_INET, socket.SOCK_DGRAM)
-s.set_proxy(socks.SOCKS5, "localhost", 1337)  # your SOCKS5 port
+
+# Set proxy with username and password authentication
+s.setproxy(
+    socks.SOCKS5,           # SOCKS version
+    "localhost",            # SOCKS server address
+    1337,                   # SOCKS server port
+    rdns=True,              # Resolve DNS remotely
+    username="admin",       # Username for authentication
+    password="password"     # Password for authentication
+)
 
 try:
     # Send DNS query for google.com

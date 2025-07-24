@@ -5,7 +5,13 @@
 
 <h1 align="center">
   <br>
-  <a href="https://anyip.io/"><img src="https://assets-global.website-files.com/64c7ccf18389fcc8fd4af160/64f8176e020b388c460e193a_logo-white.svg" alt="anyIP Proxy" width="200"></a>
+  <a href="https://anyip.io/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/2582791e-0b95-402a-b8b0-cb7290236c05">
+      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/fa0187ae-e322-4b7e-9770-eade281ff9d8">
+      <img alt="anyIP Logo" src="https://github.com/user-attachments/assets/fa0187ae-e322-4b7e-9770-eade281ff9d8" width="200">
+    </picture>
+  </a>
   <br>
 </h1>
 

@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Context;
 use socket2::{Domain, Socket, Type};
+use std::fmt::Display;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
@@ -1136,17 +1137,18 @@ pub async fn run_udp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
 /// Handle the associate command by running a UDP proxy until the connection is done.
 ///
 /// This version allows passing in a custom transfer function while reusing the initialization code.
-pub async fn run_udp_proxy_custom<T, F, R>(
+pub async fn run_udp_proxy_custom<T, F, E, R>(
     proto: Socks5ServerProtocol<T, states::CommandRead>,
     _addr: &TargetAddr,
     peer_bind_ip: Option<IpAddr>,
     reply_ip: IpAddr,
     transfer: F,
-) -> Result<T, SocksServerError>
+) -> Result<T, E>
 where
     T: AsyncRead + AsyncWrite + Unpin,
     F: FnOnce(Socket) -> R,
     R: Future<Output = Result<(), SocksServerError>>,
+    E: From<SocksServerError> + Display,
 {
     // The DST.ADDR and DST.PORT fields contain the address and port that
     // the client expects to use to send UDP datagrams on for the

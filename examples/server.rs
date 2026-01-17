@@ -7,7 +7,7 @@ use fast_socks5::{
     server::{run_tcp_proxy, run_udp_proxy, DnsResolveHelper as _, Socks5ServerProtocol},
     ReplyError, Result, Socks5Command, SocksError,
 };
-use std::future::Future;
+use std::{future::Future, num::ParseFloatError, time::Duration};
 use structopt::StructOpt;
 use tokio::net::TcpListener;
 use tokio::task;
@@ -37,8 +37,8 @@ struct Opt {
     pub public_addr: Option<std::net::IpAddr>,
 
     /// Request timeout
-    #[structopt(short = "t", long, default_value = "10")]
-    pub request_timeout: u64,
+    #[structopt(short = "t", long, default_value = "10", parse(try_from_str=parse_duration))]
+    pub request_timeout: Duration,
 
     /// Choose authentication type
     #[structopt(subcommand, name = "auth")] // Note that we mark a field as a subcommand
@@ -64,6 +64,11 @@ enum AuthMode {
         #[structopt(short, long)]
         password: String,
     },
+}
+
+fn parse_duration(s: &str) -> Result<Duration, ParseFloatError> {
+    let seconds = s.parse()?;
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 /// Useful read 1. https://blog.yoshuawuyts.com/rust-streams/

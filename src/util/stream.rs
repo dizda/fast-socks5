@@ -78,13 +78,13 @@ impl ConnectError {
 
 pub async fn tcp_connect_with_timeout<T>(
     addr: T,
-    request_timeout_s: u64,
+    request_timeout: Duration,
 ) -> Result<TcpStream, ConnectError>
 where
     T: ToSocketAddrs,
 {
     let fut = tcp_connect(addr);
-    match timeout(Duration::from_secs(request_timeout_s), fut).await {
+    match timeout(request_timeout, fut).await {
         Ok(result) => result,
         Err(_) => Err(ConnectError::ConnectionTimeout),
     }

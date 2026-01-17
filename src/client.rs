@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -19,7 +20,7 @@ const MAX_ADDR_LEN: usize = 260;
 #[derive(Debug)]
 pub struct Config {
     /// Timeout of the socket connect
-    connect_timeout: Option<u64>,
+    connect_timeout: Option<Duration>,
     /// Avoid useless roundtrips if we don't need the Authentication layer
     /// make sure to also activate it on the server side.
     skip_auth: bool,
@@ -36,8 +37,8 @@ impl Default for Config {
 
 impl Config {
     /// How much time it should wait until the socket connect times out.
-    pub fn set_connect_timeout(&mut self, n: u64) -> &mut Self {
-        self.connect_timeout = Some(n);
+    pub fn set_connect_timeout(&mut self, d: Duration) -> &mut Self {
+        self.connect_timeout = Some(d);
         self
     }
 

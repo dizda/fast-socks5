@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::task::{Context as AsyncContext, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs, UdpSocket};
 use tokio::try_join;
@@ -87,7 +88,7 @@ impl<T> ErrorContext<T> for Result<T, FromUtf8Error> {
 #[derive(Clone)]
 pub struct Config<A: Authentication = DenyAuthentication> {
     /// Timeout of the command request
-    request_timeout: u64,
+    request_timeout: Duration,
     /// Avoid useless roundtrips if we don't need the Authentication layer
     skip_auth: bool,
     /// Enable dns-resolving
@@ -108,7 +109,7 @@ pub struct Config<A: Authentication = DenyAuthentication> {
 impl<A: Authentication> Default for Config<A> {
     fn default() -> Self {
         Config {
-            request_timeout: 10,
+            request_timeout: Duration::from_secs(10),
             skip_auth: false,
             dns_resolve: true,
             execute_command: true,
@@ -217,8 +218,8 @@ impl Authentication for AcceptAuthentication {
 
 impl<A: Authentication> Config<A> {
     /// How much time it should wait until the request timeout.
-    pub fn set_request_timeout(&mut self, n: u64) -> &mut Self {
-        self.request_timeout = n;
+    pub fn set_request_timeout(&mut self, d: Duration) -> &mut Self {
+        self.request_timeout = d;
         self
     }
 
@@ -1055,7 +1056,7 @@ where
 pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     proto: Socks5ServerProtocol<T, states::CommandRead>,
     addr: &TargetAddr,
-    request_timeout_s: u64,
+    request_timeout: Duration,
     nodelay: bool,
 ) -> Result<T, SocksServerError> {
     let addr = try_notify!(
@@ -1066,7 +1067,7 @@ pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
     );
 
     // TCP connect with timeout, to avoid memory leak for connection that takes forever
-    let outbound = match tcp_connect_with_timeout(addr, request_timeout_s).await {
+    let outbound = match tcp_connect_with_timeout(addr, request_timeout).await {
         Ok(stream) => stream,
         Err(err) => {
             proto.reply_error(&err.to_reply_error()).await?;

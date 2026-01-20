@@ -153,7 +153,7 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
 
     let (proto, cmd, target_addr) = proto.read_command().await?.resolve_dns().await?;
 
-    const REQUEST_TIMEOUT: u64 = 10;
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
     match cmd {
         Socks5Command::TCPConnect => {
             run_tcp_proxy(proto, &target_addr, REQUEST_TIMEOUT, false).await?;
